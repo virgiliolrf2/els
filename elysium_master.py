@@ -18,8 +18,8 @@ if os.name == 'nt':
 
     print("[BOOT] 🛠️ Configurando Ambiente Virtual no WSL (Evita conflitos PEP 668)...")
     try:
-        # 1. Install System Deps (venv)
-        subprocess.check_call(["wsl", "bash", "-c", "sudo apt update && sudo apt install -y python3 python3-venv python3-pip"])
+        # 1. Install System Deps (venv + GO for compiling hivemind p2pd if needed)
+        subprocess.check_call(["wsl", "bash", "-c", "sudo apt update && sudo apt install -y python3 python3-venv python3-pip golang-go"])
 
         # 2. Create Venv & Install Libs
         setup_cmd = (
@@ -42,6 +42,47 @@ if os.name == 'nt':
 # DAQUI PARA BAIXO É CÓDIGO LINUX (RODANDO DENTRO DO WSL OU LINUX NATIVO)
 # ==============================================================================
 
+def check_and_fix_hivemind():
+    """
+    Checks if the p2pd binary is compatible with the current architecture.
+    If not, forces a rebuild from source using Go.
+    """
+    try:
+        import hivemind.hivemind_cli as cli
+        p2pd_path = os.path.join(os.path.dirname(cli.__file__), 'p2pd')
+
+        # Check 1: Exists?
+        if not os.path.exists(p2pd_path):
+            raise FileNotFoundError("p2pd binary missing")
+
+        # Check 2: Execution Test
+        # We try to run 'p2pd version' (or just run it and expect timeout/exit)
+        # p2pd usually doesn't have a version flag that exits cleanly, but if it fails with Exec Format Error, subprocess catches it.
+        try:
+            # Just checking if we can spawn it. If it's a shell script wrapper error, it happens here.
+            # p2pd without args might hang waiting for input, so we use a timeout.
+            # But the error reported was "Syntax error", which happens on spawn.
+            proc = subprocess.Popen([p2pd_path, "--help"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            proc.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            proc.kill() # It ran, so it works.
+        except Exception as e:
+            print(f"[BOOT] ⚠️ Hivemind p2pd Check Failed: {e}")
+            raise e # Trigger rebuild
+
+    except Exception as e:
+        print(f"[BOOT] 🛠️ Rebuilding Hivemind from Source (Architecture Mismatch Detected)...")
+        print(f"[BOOT] This may take a few minutes. Please wait.")
+        try:
+            # Force reinstall with source build (requires Go)
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "--force-reinstall", "--no-binary", "hivemind", "hivemind"])
+            print("[BOOT] ✅ Rebuild Complete. Restarting Master...")
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+        except Exception as build_err:
+            print(f"[BOOT] ❌ Critical Failure rebuilding Hivemind: {build_err}")
+            sys.exit(1)
+
+check_and_fix_hivemind()
 import hivemind
 
 app = Flask(__name__)
