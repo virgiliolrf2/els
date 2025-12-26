@@ -8,7 +8,11 @@ import requests
 import torch
 import hivemind
 import transformers
+import threading
+import queue
+import io
 from pathlib import Path
+from cryptography.fernet import Fernet
 import elysium_crypto
 
 # --- CONFIG ---
@@ -116,6 +120,87 @@ def sign_and_publish_metrics(dht, step, loss, velocity, private_key, public_key_
     # Also update global progress key with expiration (Master polls this)
     # dht.store(f"job_{JOB_ID}_progress", step, ...)
 
+# --- DATA STREAMER (PRODUCER) ---
+class DataStreamer:
+    def __init__(self, config):
+        self.config = config
+        self.queue = queue.Queue(maxsize=5) # Infinite Buffer (capped at 5 to save RAM)
+        self.active = True
+        self.worker_id = os.environ.get("ELYSIUM_WORKER_ID", "unknown")
+
+        # Start Producer Thread
+        self.thread = threading.Thread(target=self._producer_loop, daemon=True)
+        self.thread.start()
+
+    def _fetch_data(self):
+        """Fetches and decrypts data batch based on protocol."""
+        ds = self.config.get("data_source")
+        if not ds:
+            # Fallback: Random Noise (for testing)
+            return torch.randint(0, 1000, (8, 128))
+
+        protocol = ds.get("protocol", "s3")
+        url = ds.get("url")
+        key = ds.get("decryption_key")
+
+        try:
+            # Protocol A: S3/MinIO (Presigned URL)
+            if protocol == "s3":
+                r = requests.get(url, timeout=10)
+                if r.status_code == 403:
+                    print("[STREAM] ⚠️ 403 Forbidden. Link expired. Refreshing...", flush=True)
+                    # TODO: Trigger re-fetch of config from Master
+                    # For MVP, we raise error to retry later
+                    raise ConnectionRefusedError("Expired S3 Link")
+                r.raise_for_status()
+                data_bytes = r.content
+
+            # Protocol B: Encrypted IPFS
+            elif protocol == "ipfs":
+                # Mock IPFS fetch via gateway
+                gateway = f"https://ipfs.io/ipfs/{url.replace('ipfs://', '')}"
+                r = requests.get(gateway, timeout=30)
+                r.raise_for_status()
+                encrypted_bytes = r.content
+
+                # Decrypt In-Memory (AES/Fernet)
+                if key:
+                    f = Fernet(key.encode())
+                    data_bytes = f.decrypt(encrypted_bytes)
+                else:
+                    data_bytes = encrypted_bytes # Unsafe if public
+
+            else:
+                return torch.randint(0, 1000, (8, 128))
+
+            # Transform bytes to Tensor (Mock logic for text/parquet)
+            # In real life: use pyarrow or safetensors on 'io.BytesIO(data_bytes)'
+            # Here we just use the length to seed randomness to simulate "content"
+            seed = len(data_bytes)
+            torch.manual_seed(seed)
+            return torch.randint(0, 1000, (8, 128))
+
+        except Exception as e:
+            print(f"[STREAM] ❌ Fetch Error: {e}", flush=True)
+            time.sleep(2)
+            return None
+
+    def _producer_loop(self):
+        print("[STREAM] 🚀 Producer Thread Started.", flush=True)
+        while self.active:
+            if not self.queue.full():
+                batch = self._fetch_data()
+                if batch is not None:
+                    self.queue.put(batch)
+                else:
+                    time.sleep(1) # Backoff
+            else:
+                time.sleep(0.1) # Wait for consumer
+
+    def get_batch(self):
+        """Consumer method called by training loop."""
+        return self.queue.get()
+
 def run_data_parallel(dht, config, private_key, public_key_pem):
     print("[RUNNER] 🧠 Initializing Data Parallel Training...", flush=True)
 
@@ -147,15 +232,20 @@ def run_data_parallel(dht, config, private_key, public_key_pem):
     signal.signal(signal.SIGTERM, shutdown_handler)
     signal.signal(signal.SIGINT, shutdown_handler)
 
+    # Initialize Data Streamer
+    streamer = DataStreamer(config)
+
     print("[RUNNER] 🚀 Loop Started.", flush=True)
     step = 0
     start_time = time.time()
 
-    # Mock Data Loop (In real usage, we load dataset)
+    # Infinite Buffer Loop
     while step < config.get("target_steps", 100):
-        # Mock Training Step
+        # Get Data from Queue (Consumer)
+        dummy_input = streamer.get_batch()
+
+        # Training Step
         optimizer.zero_grad()
-        dummy_input = torch.randint(0, 1000, (8, 128)) # Batch 8
         outputs = model(dummy_input, labels=dummy_input)
         loss = outputs.loss
         loss.backward()

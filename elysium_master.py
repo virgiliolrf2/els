@@ -442,11 +442,19 @@ def api_job_start():
     CURRENT_MISSION["status"] = "ACTIVE"
     CURRENT_MISSION["mode"] = mode
 
+    # Mocking a Presigned URL generation for MVP
+    # In production: boto3.client('s3').generate_presigned_url(...)
+    mock_presigned = f"https://s3.amazonaws.com/secure-bucket/train-data.parquet?token={uuid.uuid4()}"
+
     job_spec = {
         "mode": mode,
         "model_name": model,
         "total_layers": layers,
-        "data_source": {"s3_bucket": "secure-bucket", "key": "train-data.parquet"}
+        "data_source": {
+            "protocol": "s3",
+            "url": mock_presigned,
+            "decryption_key": None # Or "aes-key-here" if using encrypted IPFS
+        }
     }
 
     SCHEDULER.schedule_job(job_spec)
