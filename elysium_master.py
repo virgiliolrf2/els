@@ -60,6 +60,7 @@ import datasets
 
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
+app.jinja_env.filters['from_json'] = json.loads
 
 # --- CONFIG ---
 DB_FILE = "elysium_ledger_v4.db"
