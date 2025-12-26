@@ -4,6 +4,7 @@ import time
 import json
 import signal
 import argparse
+import requests
 import torch
 import hivemind
 import transformers

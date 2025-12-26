@@ -12,6 +12,7 @@ import elysium_crypto
 # --- ARGUMENTS & CONFIG ---
 parser = argparse.ArgumentParser()
 parser.add_argument("--master_url", type=str, default="http://127.0.0.1:5000")
+parser.add_argument("--wallet_id", type=str, default=None, help="Link this node to your Elysium Wallet ID")
 args = parser.parse_args()
 
 BASE_DIR = Path.cwd().resolve()
@@ -103,7 +104,8 @@ def register_worker():
         requests.post(f"{args.master_url}/api/job/heartbeat", json={
             "worker_id": wid,
             "public_key": pub_pem,
-            "hardware": profile
+            "hardware": profile,
+            "wallet_id": args.wallet_id
         }, timeout=5)
         return wid
     except Exception as e:
