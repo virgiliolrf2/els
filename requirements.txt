@@ -8,3 +8,7 @@ psutil
 torch
 transformers
 hivemind
+nvidia-ml-py3
+gputil
+datasets
+pynvml
