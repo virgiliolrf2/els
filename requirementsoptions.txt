@@ -1,0 +1,35 @@
+# --- ELYSIUM CORE (O Motor da Distribuição) ---
+hivemind                # Permite o treino descentralizado (Swarm)
+torch                   # A base matemática (PyTorch)
+tqdm                    # Barras de progresso bonitinhas no terminal
+
+# --- COMPUTER VISION (Visão Computacional) ---
+ultralytics             # YOLOv8 (Detecção de objetos rápida)
+opencv-python-headless  # Processamento de imagem (OpenCV) - versao headless para servidor
+torchvision             # Utilitários oficiais do PyTorch para imagem
+pydicom                 # Para ler arquivos médicos (Raio-X, Tomografia)
+pillow                  # Manipulação básica de imagens
+
+# --- AUDIO & SPEECH (Áudio e Fala) ---
+librosa                 # Análise de áudio e música
+soundfile               # Leitura e gravação de arquivos de áudio
+torchaudio              # Utilitários oficiais do PyTorch para áudio
+
+# --- REINFORCEMENT LEARNING (Agentes Inteligentes) ---
+gymnasium               # O ambiente de simulação (antigo OpenAI Gym)
+stable-baselines3       # Algoritmos prontos (PPO, DQN, A2C)
+shimmy                  # Compatibilidade entre versões de ambientes
+
+# --- DATA SCIENCE & TABULAR (Dados Clássicos) ---
+pandas                  # Tabelas e Excel (o "Excel do Python")
+numpy                   # Cálculos matemáticos pesados
+scikit-learn            # Machine Learning clássico (Regressão, K-Means)
+xgboost                 # O melhor algoritmo para dados tabulares
+
+# --- LLMs & GENERATIVE AI (O "Cérebro" Texto) ---
+transformers            # HuggingFace (A biblioteca padrão para LLMs)
+accelerate              # Otimiza o treino em GPUs (necessário para HF)
+datasets                # Carregador de dados eficiente
+tokenizers              # Transforma texto em números
+bitsandbytes            # PERMITE rodar modelos grandes em GPUs normais (Quantização)
+peft                    # Treino eficiente (LoRA) - treina só uma "casca" do modelo

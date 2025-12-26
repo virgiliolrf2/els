@@ -1,0 +1,1 @@
+import time, hivemind; dht = hivemind.DHT(start=True, host_maddrs=["/ip4/0.0.0.0/tcp/8001"]); print(f"__ADDR_START__{dht.get_visible_maddrs()[0]}__ADDR_END__", flush=True); while True: time.sleep(10)
