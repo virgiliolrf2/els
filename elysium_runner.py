@@ -2,6 +2,7 @@ import os
 import sys
 import time
 import json
+import signal
 import argparse
 import torch
 import hivemind
@@ -119,6 +120,16 @@ def run_data_parallel(dht, config, private_key, public_key_pem):
         verbose=True
     )
 
+    # Graceful Shutdown Handler
+    def shutdown_handler(signum, frame):
+        print(f"\n[RUNNER] 🛑 Caught signal {signum}. Shutting down optimizer...", flush=True)
+        opt.shutdown()
+        dht.shutdown()
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, shutdown_handler)
+    signal.signal(signal.SIGINT, shutdown_handler)
+
     print("[RUNNER] 🚀 Loop Started.", flush=True)
     step = 0
     start_time = time.time()
@@ -144,6 +155,7 @@ def run_data_parallel(dht, config, private_key, public_key_pem):
             sign_and_publish_metrics(dht, step, loss.item(), velocity, private_key, public_key_pem)
 
     print("[RUNNER] ✅ Training Complete.", flush=True)
+    opt.shutdown()
 
 def run_model_parallel(dht, config, private_key, public_key_pem):
     print("[RUNNER] 🧩 Initializing Model Parallel (Layer Serving)...", flush=True)
@@ -205,12 +217,23 @@ def run_model_parallel(dht, config, private_key, public_key_pem):
     print(f"[RUNNER] 🚀 Serving Module UID: {uid}", flush=True)
     server.start()
 
+    # Graceful Shutdown Handler for Server
+    def shutdown_server_handler(signum, frame):
+        print(f"\n[RUNNER] 🛑 Caught signal {signum}. Shutting down server...", flush=True)
+        server.shutdown()
+        dht.shutdown()
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, shutdown_server_handler)
+    signal.signal(signal.SIGINT, shutdown_server_handler)
+
     try:
         while True:
             time.sleep(5)
             # Heartbeat showing we are serving
             sign_and_publish_metrics(dht, 0, 0.0, 1.0, private_key, public_key_pem) # Vel=1.0 means active
-    except KeyboardInterrupt:
+    except Exception as e:
+        print(f"[RUNNER] Error in server loop: {e}", flush=True)
         server.shutdown()
 
 if __name__ == "__main__":

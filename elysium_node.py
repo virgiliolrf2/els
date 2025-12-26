@@ -136,12 +136,18 @@ def run_worker_container(job_config, master_peers, worker_id):
 
     try:
         print(f"[DOCKER] 🚀 Launching Container for Job {job_config.get('job_id')}...", flush=True)
+        # Configure GPU Request (NVIDIA Container Toolkit)
+        device_requests = [
+            docker.types.DeviceRequest(count=-1, capabilities=[['gpu']])
+        ]
+
         container = docker_client.containers.run(
             IMAGE_NAME,
             detach=True,
             environment=env_vars,
             volumes=volumes,
             network_mode="host", # Needed for P2P/DHT ease of access
+            device_requests=device_requests,
             auto_remove=True
         )
         return container
