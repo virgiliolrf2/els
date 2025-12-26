@@ -14,14 +14,28 @@ if os.name == 'nt':
     current_script = os.path.abspath(__file__)
     drive, path = os.path.splitdrive(current_script)
     wsl_path = f"/mnt/{drive.lower().replace(':', '')}{path.replace(os.sep, '/')}"
+    venv_path = "~/.elysium_master_env"
 
-    # Simple dependency check for WSL
+    print("[BOOT] 🛠️ Configurando Ambiente Virtual no WSL (Evita conflitos PEP 668)...")
     try:
-        subprocess.check_call(["wsl", "bash", "-c", "sudo apt update && sudo apt install -y python3 python3-pip python3-flask && pip install hivemind cryptography torch"])
-    except: pass
+        # 1. Install System Deps (venv)
+        subprocess.check_call(["wsl", "bash", "-c", "sudo apt update && sudo apt install -y python3 python3-venv python3-pip"])
 
-    print(f"[BOOT] 🚀 Lançando Master dentro do Linux: {wsl_path}")
-    subprocess.call(["wsl", "python3", wsl_path])
+        # 2. Create Venv & Install Libs
+        setup_cmd = (
+            f"if [ ! -d {venv_path} ]; then python3 -m venv {venv_path}; fi && "
+            f"{venv_path}/bin/pip install --quiet hivemind cryptography torch flask"
+        )
+        subprocess.check_call(["wsl", "bash", "-c", setup_cmd])
+
+    except subprocess.CalledProcessError as e:
+        print(f"[BOOT] ⚠️ Erro na instalação de dependências: {e}")
+        # Continue anyway, maybe it exists
+
+    print(f"[BOOT] 🚀 Lançando Master dentro do Linux (Venv): {wsl_path}")
+    # Run using the venv python
+    launch_cmd = f"{venv_path}/bin/python3 {wsl_path}"
+    subprocess.call(["wsl", "bash", "-c", launch_cmd])
     sys.exit(0)
 
 # ==============================================================================
