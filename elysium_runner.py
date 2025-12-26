@@ -58,6 +58,22 @@ def main():
             "target_steps": 100
         }
 
+    # 3.1 Fetch Dynamic Assignment from Master (Secure Config)
+    # The runner asks the Master "What specific part of the graph am I?"
+    # It must be authenticated.
+    try:
+        master_url = os.environ.get("ELYSIUM_MASTER_URL", "http://127.0.0.1:5000")
+        # In V5, sign this request
+        r = requests.get(f"{master_url}/api/job/config/{WORKER_ID}", timeout=5)
+        if r.status_code == 200:
+            data = r.json()
+            if data['status'] == 'ASSIGNED':
+                print(f"[RUNNER] 📥 Received Dynamic Assignment: {data['config']}", flush=True)
+                config["dynamic_assignment"] = data['config']
+                config["data_source"] = data['config'].get("data_source")
+    except Exception as e:
+        print(f"[RUNNER] ⚠️ Failed to fetch dynamic config: {e}", flush=True)
+
     print(f"[RUNNER] ⚙️ Mode: {config.get('mode')}", flush=True)
 
     # 4. Scenario A: Data Parallel (Decentralized Averaging)
@@ -172,6 +188,19 @@ def run_model_parallel(dht, config, private_key, public_key_pem):
     # This logic assumes a Transformer structure (like GPT/BERT) where we can extract blocks.
     # For a 70B model, we would use 'accelerate' to init empty and then load weights.
     # Here we define a simple wrapper to hold the layers.
+
+    # Check for Dynamic Assignment from Master
+    if config.get("dynamic_assignment"):
+        # Overwrite defaults with what Orchestrator assigned
+        layer_start = config["dynamic_assignment"].get("layer_start", layer_start)
+        num_layers = config["dynamic_assignment"].get("num_layers", num_layers)
+        print(f"[RUNNER] 🔄 Dynamic Re-Assignment: Layers {layer_start}-{layer_start+num_layers}", flush=True)
+
+    # Secure Data Streamer (Stub)
+    if config.get("data_source"):
+        ds = config["data_source"]
+        print(f"[RUNNER] 🔒 Initializing Secure Data Stream from {ds.get('s3_bucket')}...", flush=True)
+        # In real impl: boto3.client(...).get_object()
 
     print(f"[RUNNER] Serving layers {layer_start} to {layer_start + num_layers}...", flush=True)
 

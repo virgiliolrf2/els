@@ -56,15 +56,23 @@ def log_master(msg):
 # --- DB ---
 def init_db():
     conn = sqlite3.connect(DB_FILE)
-    conn.execute("CREATE TABLE IF NOT EXISTS workers (worker_id TEXT PRIMARY KEY, last_seen REAL, balance REAL, total_steps INTEGER, public_key TEXT)")
+    # Added hardware_specs column (JSON text) and region
+    conn.execute("CREATE TABLE IF NOT EXISTS workers (worker_id TEXT PRIMARY KEY, last_seen REAL, balance REAL, total_steps INTEGER, public_key TEXT, hardware_specs TEXT, region TEXT)")
     conn.commit(); conn.close()
 
-def update_worker_credit(wid, steps_inc, amount, public_key=None):
+def update_worker_credit(wid, steps_inc, amount, public_key=None, hardware=None):
     conn = sqlite3.connect(DB_FILE)
     if public_key:
-        conn.execute("INSERT OR IGNORE INTO workers (worker_id, last_seen, balance, total_steps, public_key) VALUES (?, ?, 0, 0, ?)", (wid, time.time(), public_key))
-    conn.execute("UPDATE workers SET last_seen=?, balance=balance+?, total_steps=total_steps+? WHERE worker_id=?",
-                 (time.time(), amount, steps_inc, wid))
+        # Check if hardware info provided
+        hw_str = json.dumps(hardware) if hardware else "{}"
+        region = hardware.get("region", "global") if hardware else "global"
+
+        # Upsert logic (simplistic)
+        conn.execute("INSERT OR REPLACE INTO workers (worker_id, last_seen, balance, total_steps, public_key, hardware_specs, region) VALUES (?, ?, COALESCE((SELECT balance FROM workers WHERE worker_id=?), 0), COALESCE((SELECT total_steps FROM workers WHERE worker_id=?), 0), ?, ?, ?)",
+                     (wid, time.time(), wid, wid, public_key, hw_str, region))
+    else:
+        conn.execute("UPDATE workers SET last_seen=?, balance=balance+?, total_steps=total_steps+? WHERE worker_id=?",
+                     (time.time(), amount, steps_inc, wid))
     conn.commit(); conn.close()
 
 def get_worker_balance(wid):
@@ -73,6 +81,82 @@ def get_worker_balance(wid):
     res = cur.fetchone()
     conn.close()
     return res[0] if res else 0.0
+
+# --- ORCHESTRATOR & SCHEDULER ---
+
+class Orchestrator:
+    def __init__(self):
+        self.topology_map = {} # { worker_id: { "layers": [0,1,2], "data_key": "..." } }
+        self.lock = threading.Lock()
+
+    def schedule_job(self, job_spec):
+        """
+        Dynamically assigns layers to workers based on VRAM and Latency.
+        """
+        log_master("🧠 Orchestrator: Calculating Topology...")
+        conn = sqlite3.connect(DB_FILE); conn.row_factory = sqlite3.Row
+        workers = conn.execute("SELECT * FROM workers WHERE last_seen > ?", (time.time() - 300,)).fetchall()
+        conn.close()
+
+        if not workers:
+            log_master("❌ No active workers for scheduling.")
+            return
+
+        # 1. Clustering by Region (Latency Aware)
+        clusters = {}
+        for w in workers:
+            reg = w['region'] or 'global'
+            if reg not in clusters: clusters[reg] = []
+            clusters[reg].append(w)
+
+        # Select biggest cluster for Model Parallelism (to minimize cross-region latency)
+        # For Data Parallel, we can use all.
+        primary_region = max(clusters, key=lambda k: len(clusters[k]))
+        active_pool = clusters[primary_region]
+        log_master(f"🌐 Latency Optimization: Selected region '{primary_region}' with {len(active_pool)} nodes.")
+
+        # 2. Hardware Profiling & Sharding
+        # Simple Logic: Sort by Compute Score (VRAM/Speed)
+        active_pool.sort(key=lambda w: json.loads(w['hardware_specs']).get('compute_score', 0), reverse=True)
+
+        total_layers = job_spec.get('total_layers', 32)
+
+        # Calculate total compute power
+        total_score = sum([json.loads(w['hardware_specs']).get('compute_score', 0) for w in active_pool])
+        if total_score == 0: total_score = 1
+
+        current_layer = 0
+        new_topology = {}
+
+        for w in active_pool:
+            specs = json.loads(w['hardware_specs'])
+            score = specs.get('compute_score', 0)
+
+            # Proportional assignment
+            share = score / total_score
+            n_layers = int(math.ceil(share * total_layers))
+
+            # Boundary Check
+            if current_layer >= total_layers: n_layers = 0
+            elif current_layer + n_layers > total_layers: n_layers = total_layers - current_layer
+
+            if n_layers > 0:
+                new_topology[w['worker_id']] = {
+                    "layer_start": current_layer,
+                    "num_layers": n_layers,
+                    "data_source": job_spec.get("data_source") # S3 Keys / Presigned URL
+                }
+                current_layer += n_layers
+            else:
+                # Workers with no layers (or overflow) can be Data Parallel helpers or idle
+                new_topology[w['worker_id']] = {"role": "helper", "data_source": job_spec.get("data_source")}
+
+        with self.lock:
+            self.topology_map = new_topology
+
+        log_master(f"✅ Schedule Complete. Assigned {len(new_topology)} nodes.")
+
+SCHEDULER = Orchestrator()
 
 # --- HIVEMIND DHT & MONITOR ---
 def start_dht_service():
@@ -172,26 +256,51 @@ def api_wallet(worker_id):
 @app.route('/api/job/heartbeat', methods=['POST'])
 def api_heartbeat():
     # Workers report here to announce presence (Initial Registration)
-    # Payload: { "worker_id": "...", "public_key": "PEM..." }
+    # Payload: { "worker_id": "...", "public_key": "PEM...", "hardware": {...} }
     data = request.json
     wid = data.get('worker_id')
     pk = data.get('public_key') # Optional if already known
+    hw = data.get('hardware')
 
     if wid:
-        update_worker_credit(wid, 0, 0.0001, pk) # Tiny keep-alive credit
+        update_worker_credit(wid, 0, 0.0001, pk, hw) # Tiny keep-alive credit + Register HW
 
     return jsonify({"status": "ack", "peers": CURRENT_MISSION["initial_peers"]})
+
+@app.route('/api/job/config/<worker_id>')
+def api_secure_config(worker_id):
+    """
+    Securely delivers the assigned topology/shard and private data keys
+    to a specific authenticated worker.
+    """
+    # In V5.0, verify signature of request.
+    # For now, simple ID check
+    with SCHEDULER.lock:
+        assignment = SCHEDULER.topology_map.get(worker_id)
+
+    if assignment:
+        return jsonify({"status": "ASSIGNED", "config": assignment})
+    else:
+        # Default config if not scheduled yet
+        return jsonify({"status": "WAITING", "config": {"role": "standby"}})
 
 # --- UI ---
 @app.route('/', methods=['GET', 'POST'])
 def index():
     if request.method == 'POST':
         # Start New Mission
-        # For V4.0, we just set a Job ID and Config.
-        # No upload of datasets needed here as they are P2P or external.
         CURRENT_MISSION["job_id"] = f"JOB_{int(time.time())}"
         CURRENT_MISSION["status"] = "ACTIVE"
         CURRENT_MISSION["mode"] = request.form.get("mode", "data_parallel")
+
+        # New: Trigger Scheduler
+        job_spec = {
+            "mode": CURRENT_MISSION["mode"],
+            "total_layers": 32, # Example for LLM
+            "data_source": {"s3_bucket": "secure-bucket", "key": "train-data.parquet"}
+        }
+        SCHEDULER.schedule_job(job_spec)
+
         log_master(f"🆕 Mission Started: {CURRENT_MISSION['job_id']} [{CURRENT_MISSION['mode']}]")
 
     conn = sqlite3.connect(DB_FILE); conn.row_factory = sqlite3.Row

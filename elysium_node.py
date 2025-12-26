@@ -28,6 +28,55 @@ if not KEY_PATH.exists():
     pk = elysium_crypto.generate_key()
     elysium_crypto.save_key(pk, KEY_PATH)
 
+def get_hardware_profile():
+    """Detects VRAM, RAM, TFLOPS (Simulated), and Bandwidth."""
+    profile = {
+        "vram_gb": 0.0,
+        "ram_gb": 0.0,
+        "bandwidth_mbps": 100.0, # Default / Simulated
+        "region": "unknown",
+        "compute_score": 0.0
+    }
+
+    # 1. RAM
+    try:
+        profile["ram_gb"] = round(psutil.virtual_memory().total / (1024**3), 2)
+    except: pass
+
+    # 2. VRAM (NVIDIA)
+    # Since we are on host, we can try nvidia-smi
+    try:
+        import subprocess
+        # Get Total Memory
+        res = subprocess.check_output(["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"])
+        vram_mb = float(res.decode().strip())
+        profile["vram_gb"] = round(vram_mb / 1024, 2)
+
+        # Get Compute Capability / Name (Rough TFLOPS proxy)
+        res_name = subprocess.check_output(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"])
+        name = res_name.decode().strip()
+
+        # Heuristic Scoring for Orchestrator
+        score = 10.0 # Base (e.g. T4)
+        if "A100" in name: score = 100.0
+        elif "H100" in name: score = 300.0
+        elif "3090" in name: score = 30.0
+        elif "4090" in name: score = 60.0
+        profile["compute_score"] = score
+
+    except Exception:
+        # Fallback/Simulation for Dev Environment
+        # print(f"[HW] GPU Detection failed or no GPU. Using fallback.", flush=True)
+        profile["vram_gb"] = 8.0 # Simulate a basic consumer GPU
+        profile["compute_score"] = 5.0
+
+    # 3. Region / Bandwidth
+    # In real deployment, we might ping a benchmark server or check public IP geo.
+    # For MVP, we simulate or assume "US-East"
+    profile["region"] = os.environ.get("ELYSIUM_REGION", "global")
+
+    return profile
+
 def register_worker():
     """Registers this worker with the Master so it knows our Public Key."""
     try:
@@ -48,10 +97,13 @@ def register_worker():
             wid = f"node_{os.urandom(3).hex()}"
             with open(id_path, 'w') as f: f.write(wid)
 
-        print(f"[INIT] 📝 Registering {wid} with Master...", flush=True)
+        profile = get_hardware_profile()
+        print(f"[INIT] 📝 Registering {wid} with Master (VRAM: {profile['vram_gb']}GB)...", flush=True)
+
         requests.post(f"{args.master_url}/api/job/heartbeat", json={
             "worker_id": wid,
-            "public_key": pub_pem
+            "public_key": pub_pem,
+            "hardware": profile
         }, timeout=5)
         return wid
     except Exception as e:
@@ -123,9 +175,7 @@ def run_worker_container(job_config, master_peers, worker_id):
         "ELYSIUM_WORKER_ID": worker_id,
         "ELYSIUM_INITIAL_PEERS": ",".join(master_peers),
         "ELYSIUM_KEY_PATH": "/app/node_key.pem",
-        # Map workspace paths if needed for large data,
-        # but for pure P2P/Hivemind, data flows via DHT/Network mostly
-        # or loaded from public URL. For MVP, we mount workspace.
+        "ELYSIUM_MASTER_URL": args.master_url, # Pass Master URL for Secure Config Fetch
     }
 
     # Mounts
