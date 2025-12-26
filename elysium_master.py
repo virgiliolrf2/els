@@ -430,6 +430,30 @@ def api_logout():
     flask.session.clear()
     return flask.redirect('/')
 
+@app.route('/api/job/start', methods=['POST'])
+def api_job_start():
+    if 'user_id' not in flask.session: return jsonify({"status": "forbidden"}), 403
+
+    mode = request.form.get("mode", "data_parallel")
+    model = request.form.get("model", "gpt2")
+    layers = int(request.form.get("layers", 32))
+
+    CURRENT_MISSION["job_id"] = f"JOB_{int(time.time())}"
+    CURRENT_MISSION["status"] = "ACTIVE"
+    CURRENT_MISSION["mode"] = mode
+
+    job_spec = {
+        "mode": mode,
+        "model_name": model,
+        "total_layers": layers,
+        "data_source": {"s3_bucket": "secure-bucket", "key": "train-data.parquet"}
+    }
+
+    SCHEDULER.schedule_job(job_spec)
+    log_master(f"🆕 Mission Started: {CURRENT_MISSION['job_id']} [{mode}]")
+
+    return flask.redirect('/dashboard')
+
 # --- UI ROUTES ---
 
 @app.route('/', methods=['GET', 'POST'])
@@ -590,7 +614,12 @@ def dashboard():
     <div class="main">
         <!-- PAGE: OVERVIEW -->
         <div id="p-overview" class="page active">
-            <div class="header"><h1>Dashboard Overview</h1></div>
+            <div class="header">
+                <h1>Dashboard Overview</h1>
+                <div class="actions">
+                    <button class="btn" onclick="document.getElementById('modal-deploy').style.display='flex'">+ NEW MISSION</button>
+                </div>
+            </div>
             <div class="grid-3">
                 <div class="card">
                     <div class="metric-label">Total Earnings</div>
@@ -697,6 +726,28 @@ def dashboard():
                 <p>Email: {{ user.email }}</p>
                 <p>Password: ********</p>
                 <button class="btn btn-outline">Change Password</button>
+            </div>
+        </div>
+
+        <!-- MODAL: DEPLOY MISSION -->
+        <div id="modal-deploy" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.8); justify-content:center; align-items:center;">
+            <div class="card" style="width:400px;">
+                <h2 style="margin-top:0">New Training Mission</h2>
+                <form action="/api/job/start" method="POST">
+                    <label class="metric-label">Mode</label>
+                    <select name="mode" style="width:100%; padding:10px; margin:10px 0 20px; background:#0f172a; color:#fff; border:1px solid #334155; border-radius:6px">
+                        <option value="data_parallel">Data Parallel (Distributed Gradient)</option>
+                        <option value="model_parallel">Model Parallel (Layer Splitting)</option>
+                    </select>
+
+                    <label class="metric-label">Model Architecture</label>
+                    <input name="model" value="gpt2" style="width:100%; padding:10px; margin:10px 0 20px; background:#0f172a; color:#fff; border:1px solid #334155; border-radius:6px">
+
+                    <div style="display:flex; justify-content:space-between; gap:10px">
+                        <button type="button" class="btn btn-outline" onclick="document.getElementById('modal-deploy').style.display='none'">CANCEL</button>
+                        <button type="submit" class="btn">LAUNCH SWARM</button>
+                    </div>
+                </form>
             </div>
         </div>
 
