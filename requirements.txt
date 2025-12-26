@@ -1,2 +1,10 @@
 opencv-python-headless
 numpy
+flask
+requests
+docker
+cryptography
+psutil
+torch
+transformers
+hivemind
