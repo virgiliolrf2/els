@@ -199,6 +199,7 @@ def run_worker_container(job_config, master_peers, worker_id):
             environment=env_vars,
             volumes=volumes,
             network_mode="host", # Needed for P2P/DHT ease of access
+            ipc_mode="host", # Fix for PyTorch "Bus error": Allow shared memory access
             device_requests=device_requests,
             auto_remove=True
         )
