@@ -63,6 +63,14 @@ app = Flask(__name__)
 app.secret_key = os.urandom(24)
 app.jinja_env.filters['from_json'] = json.loads
 
+# --- DESIGN ASSETS ---
+LOGO_SVG = """
+<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M12 2L2 12L12 22L22 12L12 2Z" fill="#10B981" stroke="#059669" stroke-width="2" stroke-linejoin="round"/>
+<path d="M12 6L6 12L12 18L18 12L12 6Z" fill="#D1FAE5" stroke="#10B981" stroke-width="1.5" stroke-linejoin="round"/>
+</svg>
+"""
+
 # --- CONFIG ---
 DB_FILE = "elysium_ledger_v4.db"
 STORAGE_DIR = Path("./elysium_storage")
@@ -212,9 +220,18 @@ def api_job_current(): return jsonify({"meta": CURRENT_MISSION})
 @app.route('/api/wallet/balance/<wallet_id>')
 def api_wallet(wallet_id):
     conn = sqlite3.connect(DB_FILE)
+    # Check User Account
     res = conn.execute("SELECT balance FROM users WHERE wallet_id=?", (wallet_id,)).fetchone()
+    if res:
+        bal = res[0]
+    else:
+        # Check Standalone Worker Aggregation
+        # Sum balances of all workers owned by this wallet
+        res = conn.execute("SELECT SUM(balance) FROM workers WHERE owner_wallet_id=?", (wallet_id,)).fetchone()
+        bal = res[0] if res[0] else 0.0
+
     conn.close()
-    return jsonify({"wallet_id": wallet_id, "balance": res[0] if res else 0.0})
+    return jsonify({"wallet_id": wallet_id, "balance": bal})
 
 @app.route('/api/job/heartbeat', methods=['POST'])
 def api_heartbeat():
@@ -231,21 +248,40 @@ def api_secure_config(worker_id):
 
 @app.route('/api/wallet/withdraw', methods=['POST'])
 def api_withdraw():
-    if 'user_id' not in flask.session: return jsonify({"status": "error"}), 403
     addr = request.form.get("address")
-    conn = sqlite3.connect(DB_FILE)
-    try:
-        user = conn.execute("SELECT * FROM users WHERE email=?", (flask.session['user_id'],)).fetchone()
-        if user and user[3] >= 10.0: # Check balance >= 10
-            # Deduct
-            conn.execute("UPDATE users SET balance = balance - ? WHERE email=?", (user[3], user[0]))
-            # Log
-            conn.execute("INSERT INTO withdrawals (wallet_id, address, amount, status, timestamp) VALUES (?, ?, ?, ?, ?)",
-                         (user[2], addr, user[3], 'PENDING', time.time()))
-            conn.commit()
-            return jsonify({"status": "ok", "message": "Withdrawal Pending"})
-        return jsonify({"status": "error", "message": "Insufficient Funds"}), 400
-    finally: conn.close()
+    wallet_id = request.form.get("wallet_id")
+
+    # 1. Authenticated User (Session)
+    if 'user_id' in flask.session:
+        conn = sqlite3.connect(DB_FILE)
+        try:
+            user = conn.execute("SELECT * FROM users WHERE email=?", (flask.session['user_id'],)).fetchone()
+            if user and user[3] >= 10.0:
+                conn.execute("UPDATE users SET balance = balance - ? WHERE email=?", (user[3], user[0]))
+                conn.execute("INSERT INTO withdrawals (wallet_id, address, amount, status, timestamp) VALUES (?, ?, ?, ?, ?)",
+                             (user[2], addr, user[3], 'PENDING', time.time()))
+                conn.commit()
+                return jsonify({"status": "ok", "message": "Withdrawal Pending"})
+        finally: conn.close()
+
+    # 2. Standalone Worker (App Request)
+    elif wallet_id:
+        conn = sqlite3.connect(DB_FILE)
+        try:
+            # Sum Balance
+            res = conn.execute("SELECT SUM(balance) FROM workers WHERE owner_wallet_id=?", (wallet_id,)).fetchone()
+            total = res[0] if res[0] else 0.0
+
+            if total >= 10.0:
+                # Deduct from all workers proportionally or reset to 0
+                conn.execute("UPDATE workers SET balance = 0 WHERE owner_wallet_id=?", (wallet_id,))
+                conn.execute("INSERT INTO withdrawals (wallet_id, address, amount, status, timestamp) VALUES (?, ?, ?, ?, ?)",
+                             (wallet_id, addr, total, 'PENDING', time.time()))
+                conn.commit()
+                return jsonify({"status": "ok", "message": "Withdrawal Pending"})
+        finally: conn.close()
+
+    return jsonify({"status": "error", "message": "Insufficient Funds or Invalid Auth"}), 400
 
 @app.route('/api/admin/payout', methods=['POST'])
 def api_admin_payout():
@@ -342,7 +378,69 @@ def api_job_start():
 def index():
     if 'user_id' not in flask.session:
         return render_template_string("""
-<!DOCTYPE html><html><head><title>Elysium Cloud</title><style>body{background:#0f172a;color:#fff;font-family:sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;margin:0}.card{background:#1e293b;padding:40px;border-radius:12px;width:300px}input,button{width:100%;padding:10px;margin:5px 0;border-radius:5px;border:none}button{background:#2563eb;color:#fff;font-weight:bold;cursor:pointer}</style></head><body><div class="card"><h2 style="text-align:center">Elysium</h2><form onsubmit="event.preventDefault(); fetch('/api/auth/login', {method:'POST', body:new FormData(this)}).then(r=>r.json()).then(d=>{if(d.status=='ok')location.href=d.redirect; else alert('Error')})"><input name="email" placeholder="Email"><input type="password" name="password" placeholder="Password"><button>Login</button></form><div style="text-align:center;margin-top:10px;font-size:12px;cursor:pointer" onclick="fetch('/api/auth/signup', {method:'POST', body:new FormData(document.querySelector('form'))}).then(r=>r.json()).then(d=>{if(d.status=='ok')location.href=d.redirect})">No account? Sign Up</div></div></body></html>""")
+<!DOCTYPE html>
+<html lang="en" class="h-full bg-slate-50">
+<head>
+    <meta charset="UTF-8">
+    <title>Elysium Cloud | Sign In</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style> body { font-family: 'Inter', sans-serif; } </style>
+</head>
+<body class="h-full flex items-center justify-center">
+    <div class="bg-white p-8 rounded-2xl shadow-xl border border-slate-100 w-96">
+        <div class="flex flex-col items-center mb-6">
+            <div class="w-12 h-12 mb-2">{{ logo|safe }}</div>
+            <h2 class="text-2xl font-bold text-slate-900 tracking-tight">Elysium Cloud</h2>
+            <p class="text-sm text-slate-500">Enterprise Infrastructure Control</p>
+        </div>
+
+        <form onsubmit="event.preventDefault(); submitForm(this)" class="space-y-4">
+            <div>
+                <label class="block text-xs font-medium text-slate-500 uppercase mb-1">Email</label>
+                <input name="email" type="email" class="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:bg-white transition" placeholder="name@company.com" required>
+            </div>
+            <div>
+                <label class="block text-xs font-medium text-slate-500 uppercase mb-1">Password</label>
+                <input name="password" type="password" class="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:bg-white transition" placeholder="••••••••" required>
+            </div>
+            <button type="submit" class="w-full py-2.5 bg-emerald-500 hover:bg-emerald-600 text-white font-semibold rounded-lg shadow-sm transition">Access Console</button>
+        </form>
+
+        <div class="mt-6 text-center">
+            <p class="text-xs text-slate-400 cursor-pointer hover:text-emerald-600" onclick="toggleMode()">Don't have an account? Create one</p>
+        </div>
+    </div>
+
+    <script>
+        let isSignup = false;
+        const logo = `{{ logo|safe }}`;
+
+        function toggleMode() {
+            isSignup = !isSignup;
+            const btn = document.querySelector('button');
+            const link = document.querySelector('p.text-xs');
+            if(isSignup) {
+                btn.innerText = "Create Workspace";
+                link.innerText = "Already have an account? Sign In";
+            } else {
+                btn.innerText = "Access Console";
+                link.innerText = "Don't have an account? Create one";
+            }
+        }
+
+        function submitForm(form) {
+            const endpoint = isSignup ? '/api/auth/signup' : '/api/auth/login';
+            fetch(endpoint, {method:'POST', body:new FormData(form)})
+            .then(r=>r.json())
+            .then(d=>{
+                if(d.status=='ok') location.href = d.redirect;
+                else alert(d.message || "Authentication Failed");
+            });
+        }
+    </script>
+</body>
+</html>""", logo=LOGO_SVG)
     return flask.redirect('/dashboard')
 
 @app.route('/dashboard')
@@ -355,81 +453,174 @@ def dashboard():
     txs = conn.execute("SELECT * FROM withdrawals WHERE wallet_id=? ORDER BY timestamp DESC", (user['wallet_id'],)).fetchall()
     conn.close()
 
+    # Calculate Metrics
+    active_nodes = len([w for w in workers if time.time() - w['last_seen'] < 60])
+    hashrate = sum([json.loads(w['hardware_specs']).get('compute_score', 0) for w in workers])
+    payouts = sum([t['amount'] for t in txs if t['status']=='PAID'])
+
     return render_template_string("""
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="bg-slate-50">
 <head>
     <meta charset="UTF-8">
-    <title>Elysium Mission Control</title>
+    <title>Elysium Console</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="//unpkg.com/alpinejs" defer></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <style>
-        :root { --primary: #2563eb; --success: #22c55e; --bg: #0f172a; --surface: #1e293b; --text: #f1f5f9; --border: #334155; }
-        body { font-family: 'Inter', sans-serif; background: var(--bg); color: var(--text); margin:0; display: flex; height: 100vh; overflow: hidden; }
-        .sidebar { width: 250px; background: #020617; border-right: 1px solid var(--border); padding: 20px; display:flex; flex-direction:column; }
-        .nav-item { padding: 12px; margin: 5px 0; border-radius: 8px; color: #94a3b8; cursor: pointer; transition: 0.2s; font-weight: 500; }
-        .nav-item:hover, .nav-item.active { background: rgba(37, 99, 235, 0.1); color: var(--primary); }
-        .main { flex: 1; padding: 30px; overflow-y: auto; }
-        .page { display: none; } .page.active { display: block; }
-        .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 24px; position:relative; margin-bottom: 20px; }
-        .metric-val { font-size: 32px; font-weight: 700; margin: 10px 0 5px; }
-        .metric-label { font-size: 13px; color: #94a3b8; font-weight: 500; text-transform: uppercase; }
-        .btn { background: var(--primary); color: #fff; border: none; padding: 10px 20px; border-radius: 6px; font-weight: 600; cursor: pointer; }
-        table { width: 100%; border-collapse: collapse; }
-        th { text-align: left; color: #94a3b8; font-size: 12px; padding: 15px; border-bottom: 1px solid var(--border); }
-        td { padding: 15px; border-bottom: 1px solid var(--border); font-size: 14px; }
-    </style>
-    <script>
-        function show(id) {
-            document.querySelectorAll('.page').forEach(e => e.classList.remove('active'));
-            document.getElementById('p-'+id).classList.add('active');
-        }
-    </script>
+    <style> body { font-family: 'Inter', sans-serif; } </style>
 </head>
-<body>
-    <div class="sidebar">
-        <h2 style="color:#fff; margin-bottom:30px">ELYSIUM</h2>
-        <div class="nav-item active" onclick="show('overview')">📊 Overview</div>
-        <div class="nav-item" onclick="show('payouts')">💸 Payouts</div>
-        <div class="nav-item" onclick="show('fleet')">💻 Fleet</div>
-        <div style="margin-top:auto"><a href="/api/auth/logout" style="color:#ef4444;text-decoration:none">Sign Out</a></div>
-    </div>
+<body class="flex h-screen overflow-hidden" x-data="{ page: 'dashboard' }">
 
-    <div class="main">
-        <div id="p-overview" class="page active">
-            <div style="display:flex; justify-content:space-between; margin-bottom:20px">
-                <h1>Mission Control</h1>
-                <button class="btn" onclick="document.getElementById('modal').style.display='flex'">+ NEW MISSION</button>
+    <!-- SIDEBAR -->
+    <aside class="w-64 bg-white border-r border-slate-200 flex flex-col">
+        <div class="h-16 flex items-center px-6 border-b border-slate-100">
+            <div class="w-8 h-8 mr-3">{{ logo|safe }}</div>
+            <span class="font-bold text-slate-800 tracking-tight">ELYSIUM</span>
+        </div>
+
+        <nav class="flex-1 p-4 space-y-1">
+            <a @click="page='dashboard'" :class="page==='dashboard' ? 'bg-emerald-50 text-emerald-700' : 'text-slate-600 hover:bg-slate-50'" class="flex items-center px-3 py-2.5 rounded-lg text-sm font-medium cursor-pointer transition">
+                <span class="mr-3">📊</span> Dashboard
+            </a>
+            <a @click="page='instances'" :class="page==='instances' ? 'bg-emerald-50 text-emerald-700' : 'text-slate-600 hover:bg-slate-50'" class="flex items-center px-3 py-2.5 rounded-lg text-sm font-medium cursor-pointer transition">
+                <span class="mr-3">🖥️</span> Instances
+            </a>
+            <a @click="page='payouts'" :class="page==='payouts' ? 'bg-emerald-50 text-emerald-700' : 'text-slate-600 hover:bg-slate-50'" class="flex items-center px-3 py-2.5 rounded-lg text-sm font-medium cursor-pointer transition">
+                <span class="mr-3">💳</span> Billing & Costs
+            </a>
+        </nav>
+
+        <div class="p-4 border-t border-slate-100">
+            <div class="text-xs font-semibold text-slate-400 uppercase mb-2">Workspace</div>
+            <div class="flex items-center mb-3">
+                <div class="w-8 h-8 rounded-full bg-slate-200 flex items-center justify-center text-xs font-bold text-slate-600 mr-2">
+                    {{ user.email[0]|upper }}
+                </div>
+                <div class="overflow-hidden">
+                    <p class="text-sm font-medium text-slate-700 truncate">{{ user.email }}</p>
+                    <p class="text-xs text-slate-400 truncate">ID: {{ user.wallet_id }}</p>
+                </div>
+            </div>
+            <a href="/api/auth/logout" class="block text-center text-xs text-red-500 hover:text-red-700 font-medium">Sign Out</a>
+        </div>
+    </aside>
+
+    <!-- MAIN CONTENT -->
+    <main class="flex-1 flex flex-col relative">
+        <!-- GLOBAL HEADER -->
+        <header class="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-8">
+            <div class="flex items-center bg-slate-100 rounded-md px-3 py-1.5 w-96">
+                <span class="text-slate-400 text-sm mr-2">🔍</span>
+                <input class="bg-transparent border-none focus:outline-none text-sm w-full text-slate-600" placeholder="Search resources, jobs, or docs...">
+            </div>
+            <div class="flex items-center gap-4">
+                <div class="flex items-center px-3 py-1 bg-emerald-50 text-emerald-700 rounded-full text-xs font-bold border border-emerald-100">
+                    <span class="w-2 h-2 rounded-full bg-emerald-500 mr-2 animate-pulse"></span>
+                    US-East-1
+                </div>
+                <button class="bg-slate-900 hover:bg-slate-800 text-white text-sm font-medium px-4 py-2 rounded-lg transition shadow-sm" onclick="document.getElementById('modal').showModal()">
+                    + Launch Training Job
+                </button>
+            </div>
+        </header>
+
+        <!-- DASHBOARD VIEW -->
+        <div class="flex-1 overflow-y-auto p-8 bg-slate-50" x-show="page==='dashboard'">
+            <div class="mb-8">
+                <h1 class="text-2xl font-bold text-slate-900">Platform Overview</h1>
+                <p class="text-slate-500">Real-time infrastructure telemetry.</p>
             </div>
 
-            <div class="card" style="display:flex; gap:20px">
-                <div style="flex:1">
-                    <div class="metric-label">Operating Balance</div>
-                    <div class="metric-val" style="color:var(--success)">$ {{ "%.2f"|format(user.balance) }}</div>
+            <!-- HERO METRICS -->
+            <div class="grid grid-cols-4 gap-6 mb-8">
+                <div class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
+                    <p class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">Active Nodes</p>
+                    <p class="text-3xl font-bold text-slate-900">{{ active_nodes }}</p>
                 </div>
-                <div style="flex:1">
-                    <div class="metric-label">Active Nodes</div>
-                    <div class="metric-val">{{ workers|length }}</div>
+                <div class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
+                    <p class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">Total Hashrate (Est.)</p>
+                    <p class="text-3xl font-bold text-slate-900">{{ "%.0f"|format(hashrate) }} <span class="text-lg text-slate-400 font-normal">TFLOPS</span></p>
                 </div>
+                <div class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
+                    <p class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">Operating Balance</p>
+                    <p class="text-3xl font-bold text-emerald-600">${{ "%.2f"|format(user.balance) }}</p>
+                </div>
+                <div class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
+                    <p class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">Total Payouts</p>
+                    <p class="text-3xl font-bold text-slate-900">${{ "%.2f"|format(payouts) }}</p>
+                </div>
+            </div>
+
+            <!-- INSTANCE TABLE -->
+            <div class="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+                <div class="px-6 py-4 border-b border-slate-100 flex justify-between items-center">
+                    <h3 class="font-bold text-slate-800">Instance List</h3>
+                    <span class="text-xs font-medium text-slate-500 bg-slate-100 px-2 py-1 rounded">{{ workers|length }} Total</span>
+                </div>
+                <table class="w-full text-left">
+                    <thead class="bg-slate-50 text-slate-500 text-xs uppercase font-semibold">
+                        <tr>
+                            <th class="px-6 py-3">Instance ID</th>
+                            <th class="px-6 py-3">Status</th>
+                            <th class="px-6 py-3">Hardware Type</th>
+                            <th class="px-6 py-3">Region</th>
+                            <th class="px-6 py-3">Last Seen</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-100">
+                        {% for w in workers %}
+                        <tr class="hover:bg-slate-50 transition">
+                            <td class="px-6 py-4 font-mono text-sm text-slate-700">{{ w.worker_id }}</td>
+                            <td class="px-6 py-4">
+                                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-emerald-100 text-emerald-800">
+                                    <span class="w-1.5 h-1.5 rounded-full bg-emerald-500 mr-1.5"></span> Running
+                                </span>
+                            </td>
+                            <td class="px-6 py-4 text-sm text-slate-600">{{ (w.hardware_specs|string|from_json).get('gpu_name', 'CPU Instance') }}</td>
+                            <td class="px-6 py-4 text-sm text-slate-600">{{ w.region }}</td>
+                            <td class="px-6 py-4 text-sm text-slate-400">{{ "%.0f"|format(time.time() - w.last_seen) }}s ago</td>
+                        </tr>
+                        {% else %}
+                        <tr><td colspan="5" class="px-6 py-8 text-center text-slate-400 text-sm">No instances provisioned. Run a worker node to see it here.</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
             </div>
         </div>
 
-        <div id="p-payouts" class="page">
-            <div style="display:flex; justify-content:space-between; margin-bottom:20px">
-                <h1>Payouts & Withdrawals</h1>
-                <button class="btn" style="background:#22c55e" onclick="fetch('/api/admin/payout', {method:'POST'}).then(r=>r.json()).then(d=>alert('Processed: '+d.processed))">ADMIN: PROCESS PAYOUTS</button>
+        <!-- PAYOUTS VIEW -->
+        <div class="flex-1 overflow-y-auto p-8 bg-slate-50" x-show="page==='payouts'">
+            <div class="mb-8 flex justify-between items-center">
+                <div>
+                    <h1 class="text-2xl font-bold text-slate-900">Billing & Payouts</h1>
+                    <p class="text-slate-500">Manage operating costs and worker compensation.</p>
+                </div>
+                <button class="text-sm font-bold text-emerald-600 hover:text-emerald-800" onclick="fetch('/api/admin/payout', {method:'POST'}).then(r=>r.json()).then(d=>alert('Processed: '+d.processed))">Process Pending Batches</button>
             </div>
-            <div class="card">
-                <h3>Withdrawal History</h3>
-                <table>
-                    <thead><tr><th>ID</th><th>Address</th><th>Amount</th><th>Status</th><th>TX</th></tr></thead>
-                    <tbody>
+
+            <div class="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+                <table class="w-full text-left">
+                    <thead class="bg-slate-50 text-slate-500 text-xs uppercase font-semibold">
+                        <tr>
+                            <th class="px-6 py-3">Transaction ID</th>
+                            <th class="px-6 py-3">Date</th>
+                            <th class="px-6 py-3">Destination</th>
+                            <th class="px-6 py-3">Amount</th>
+                            <th class="px-6 py-3">Status</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-100">
                         {% for t in txs %}
                         <tr>
-                            <td>#{{ t[0] }}</td>
-                            <td style="font-family:monospace">{{ t[2] }}</td>
-                            <td style="color:var(--success)">${{ "%.2f"|format(t[3]) }}</td>
-                            <td>{{ t[4] }}</td>
-                            <td style="font-size:10px">{{ t[6] or '' }}</td>
+                            <td class="px-6 py-4 text-sm text-slate-500">#{{ t.id }}</td>
+                            <td class="px-6 py-4 text-sm text-slate-700">{{ time.ctime(t.timestamp) }}</td>
+                            <td class="px-6 py-4 text-sm font-mono text-slate-500">{{ t.address }}</td>
+                            <td class="px-6 py-4 text-sm font-bold text-slate-900">${{ "%.2f"|format(t.amount) }}</td>
+                            <td class="px-6 py-4">
+                                <span class="text-xs font-bold px-2 py-1 rounded {{ 'bg-green-100 text-green-700' if t.status=='PAID' else 'bg-yellow-100 text-yellow-700' }}">
+                                    {{ t.status }}
+                                </span>
+                            </td>
                         </tr>
                         {% endfor %}
                     </tbody>
@@ -437,46 +628,53 @@ def dashboard():
             </div>
         </div>
 
-        <div id="p-fleet" class="page">
-            <h1>Compute Fleet</h1>
-            <div class="card">
-                <table>
-                    <thead><tr><th>ID</th><th>Region</th><th>Hardware</th><th>Last Seen</th></tr></thead>
-                    <tbody>
-                        {% for w in workers %}
-                        <tr>
-                            <td>{{ w[0] }}</td>
-                            <td>{{ w[6] }}</td>
-                            <td>{{ (w[5]|string|from_json).get('gpu_name', 'CPU') }}</td>
-                            <td>{{ "%.0f"|format(time.time() - w[1]) }}s ago</td>
-                        </tr>
-                        {% endfor %}
-                    </tbody>
-                </table>
-            </div>
-        </div>
+    </main>
 
-        <div id="modal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.8); justify-content:center; align-items:center;">
-            <div class="card" style="width:500px">
-                <h2>Launch New Mission</h2>
-                <form action="/api/job/start" method="POST">
-                    <label>Source Type</label>
-                    <select name="source_type" style="width:100%; padding:10px; background:#0f172a; color:#fff; border:1px solid #334155"><option value="hf">HuggingFace</option><option value="s3">S3 / MinIO</option></select>
-                    <label>Model ID</label>
-                    <input name="model" placeholder="e.g. meta-llama/Llama-2-7b" style="background:#0f172a; color:#fff; border:1px solid #334155" required>
-                    <label>Mode</label>
-                    <select name="mode" style="width:100%; padding:10px; background:#0f172a; color:#fff; border:1px solid #334155"><option value="data_parallel">Data Parallel</option><option value="model_parallel">Model Parallel</option></select>
-                    <div style="display:flex; gap:10px; margin-top:20px">
-                        <button type="button" onclick="document.getElementById('modal').style.display='none'" style="background:transparent; border:1px solid #334155">CANCEL</button>
-                        <button type="submit">LAUNCH</button>
+    <!-- MODAL -->
+    <dialog id="modal" class="rounded-xl shadow-2xl p-0 w-[600px] backdrop:bg-slate-900/50">
+        <div class="bg-white p-6">
+            <h3 class="text-xl font-bold text-slate-900 mb-1">Launch Training Job</h3>
+            <p class="text-sm text-slate-500 mb-6">Configure your distributed training mission.</p>
+
+            <form action="/api/job/start" method="POST" class="space-y-4">
+                <div class="grid grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-xs font-bold text-slate-500 uppercase mb-1">Source Type</label>
+                        <select name="source_type" class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm">
+                            <option value="hf">HuggingFace Hub</option>
+                            <option value="s3">S3 / MinIO</option>
+                        </select>
                     </div>
-                </form>
-            </div>
+                    <div>
+                        <label class="block text-xs font-bold text-slate-500 uppercase mb-1">Training Mode</label>
+                        <select name="mode" class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm">
+                            <option value="data_parallel">Data Parallel</option>
+                            <option value="model_parallel">Model Parallel</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div>
+                    <label class="block text-xs font-bold text-slate-500 uppercase mb-1">Model Path / ID</label>
+                    <input name="model" class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="meta-llama/Llama-2-7b" required>
+                </div>
+
+                <div>
+                    <label class="block text-xs font-bold text-slate-500 uppercase mb-1">JSON Configuration</label>
+                    <textarea name="config_json" rows="3" class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-mono text-slate-600" placeholder='{"lr": 2e-5, "optimizer": "adamw"}'></textarea>
+                </div>
+
+                <div class="flex justify-end gap-3 mt-6 pt-4 border-t border-slate-100">
+                    <button type="button" class="px-4 py-2 text-sm font-semibold text-slate-500 hover:text-slate-700" onclick="document.getElementById('modal').close()">Cancel</button>
+                    <button type="submit" class="px-4 py-2 text-sm font-bold text-white bg-emerald-500 hover:bg-emerald-600 rounded-lg shadow-sm">Launch Mission</button>
+                </div>
+            </form>
         </div>
-    </div>
+    </dialog>
+
 </body>
 </html>
-""", user=user, workers=workers, txs=txs, time=time, from_json=json.loads)
+""", user=user, workers=workers, txs=txs, time=time, from_json=json.loads, logo=LOGO_SVG, active_nodes=active_nodes, hashrate=hashrate, payouts=payouts)
 
 if __name__ == "__main__":
     init_db()

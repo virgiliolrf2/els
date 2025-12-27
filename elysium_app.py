@@ -63,16 +63,19 @@ class NodeThread(QThread):
                 l = line.strip()
                 self.log_sig.emit(l)
 
-                # Detect IDs
+                # Detect IDs from logs: "[INIT] 📝 Registering {wid} (Wallet: {wallet})..."
                 if "[INIT] 📝 Registering" in l and "(Wallet:" in l:
                     try:
-                        # Log: Registering node_xxx (Wallet: ELYS-YYY)
+                        # Parse: Registering node_xxx (Wallet: ELYS-YYY)
                         p1 = l.split("Registering ")[1]
                         wid = p1.split(" ")[0]
                         p2 = l.split("(Wallet: ")[1]
                         wallet = p2.split(")")[0]
                         self.worker_id_sig.emit(wid)
                         self.wallet_id_sig.emit(wallet)
+
+                        # Auto-save wallet ID
+                        save_config("wallet_id", wallet)
                     except: pass
 
         except Exception as e:
@@ -95,9 +98,12 @@ class PollThread(QThread):
     def run(self):
         while True:
             try:
-                if self.wallet_id:
+                # Use stored wallet ID if thread state is empty
+                wid = self.wallet_id or load_config().get("wallet_id")
+
+                if wid:
                     # In V4.1 Master, balance endpoint uses wallet_id
-                    r = requests.get(f"http://127.0.0.1:5000/api/wallet/balance/{self.wallet_id}", timeout=2)
+                    r = requests.get(f"http://127.0.0.1:5000/api/wallet/balance/{wid}", timeout=2)
                     if r.status_code == 200:
                         self.balance_sig.emit(r.json().get('balance', 0.0))
             except: pass
@@ -301,11 +307,14 @@ class WalletTab(QWidget):
 
     def request_payout(self):
         addr = self.input_addr.text()
-        if not addr: return
+        # Retrieve wallet_id from parent app context or file
+        wid = load_config().get("wallet_id")
+        if not addr or not wid: return
         try:
-            requests.post("http://127.0.0.1:5000/api/wallet/withdraw", data={"address": addr})
-            self.btn_withdraw.setText("REQUEST SENT")
-            self.btn_withdraw.setEnabled(False)
+            r = requests.post("http://127.0.0.1:5000/api/wallet/withdraw", data={"address": addr, "wallet_id": wid})
+            if r.status_code == 200:
+                self.btn_withdraw.setText("REQUEST SENT")
+                self.btn_withdraw.setEnabled(False)
         except: pass
 
 class TerminalTab(QWidget):
