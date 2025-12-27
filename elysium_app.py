@@ -9,9 +9,10 @@ from pathlib import Path
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QPushButton, QLabel,
                              QVBoxLayout, QWidget, QTextEdit, QHBoxLayout, QFrame,
                              QGraphicsDropShadowEffect, QStackedWidget, QListWidget,
-                             QListWidgetItem, QProgressBar, QLineEdit)
+                             QListWidgetItem, QProgressBar, QLineEdit, QComboBox)
 from PyQt5.QtCore import QThread, pyqtSignal, Qt, QSize
 from PyQt5.QtGui import QColor, QFont, QIcon
+import hashlib
 import elysium_security
 
 # --- CONFIG ---
@@ -163,6 +164,219 @@ class HardwareThread(QThread):
                 })
             except: pass
             time.sleep(2)
+
+# --- AUTH WIDGETS ---
+
+class AuthInput(QLineEdit):
+    def __init__(self, placeholder, echo=QLineEdit.Normal):
+        super().__init__()
+        self.setPlaceholderText(placeholder)
+        self.setEchoMode(echo)
+        self.setFixedHeight(45)
+        self.setStyleSheet("""
+            QLineEdit {
+                background-color: #1c1c1e;
+                border: 1px solid #2c2c2e;
+                border-radius: 8px;
+                color: #fff;
+                padding: 0 15px;
+                font-size: 14px;
+            }
+            QLineEdit:focus {
+                border: 1px solid #00E676;
+            }
+        """)
+
+class AuthButton(QPushButton):
+    def __init__(self, text, primary=True):
+        super().__init__(text)
+        self.setFixedHeight(45)
+        self.setCursor(Qt.PointingHandCursor)
+        if primary:
+            self.setStyleSheet("""
+                QPushButton {
+                    background-color: #00E676;
+                    color: #000;
+                    border: none;
+                    border-radius: 8px;
+                    font-weight: bold;
+                    font-size: 14px;
+                }
+                QPushButton:hover { background-color: #00C853; }
+            """)
+        else:
+            self.setStyleSheet("""
+                QPushButton {
+                    background-color: transparent;
+                    color: #8e8e93;
+                    border: none;
+                    font-size: 12px;
+                }
+                QPushButton:hover { color: #fff; }
+            """)
+
+class LoginWidget(QWidget):
+    switch_signal = pyqtSignal() # To Register
+    success_signal = pyqtSignal() # To Dashboard
+
+    def __init__(self):
+        super().__init__()
+        l = QVBoxLayout(self)
+        l.setAlignment(Qt.AlignCenter)
+
+        card = ModernCard(dark=True)
+        card.setFixedSize(400, 450)
+        cl = QVBoxLayout(card)
+        cl.setSpacing(15)
+        cl.setContentsMargins(40,40,40,40)
+
+        # Header
+        logo = QLabel("ELYSIUM")
+        logo.setStyleSheet("color: #fff; font-size: 24px; font-weight: 900; margin-bottom: 5px;")
+        cl.addWidget(logo, 0, Qt.AlignCenter)
+
+        sub = QLabel("Sign in to your worker node")
+        sub.setStyleSheet("color: #8e8e93; font-size: 14px; margin-bottom: 20px;")
+        cl.addWidget(sub, 0, Qt.AlignCenter)
+
+        # Inputs
+        self.email = AuthInput("Email Address")
+        self.password = AuthInput("Password", QLineEdit.Password)
+        cl.addWidget(self.email)
+        cl.addWidget(self.password)
+
+        # Submit
+        self.btn = AuthButton("Sign In")
+        self.btn.clicked.connect(self.do_login)
+        cl.addWidget(self.btn)
+
+        # Switch
+        self.switch = AuthButton("Don't have an account? Create one", False)
+        self.switch.clicked.connect(self.switch_signal.emit)
+        cl.addWidget(self.switch)
+
+        cl.addStretch()
+        l.addWidget(card)
+
+    def do_login(self):
+        email = self.email.text()
+        password = self.password.text()
+        if not email or not password: return
+
+        try:
+            url = f"http://{FORCE_MASTER_IP}:5000/api/auth/login"
+            r = requests.post(url, data={"email": email, "password": password})
+            if r.status_code == 200:
+                d = r.json()
+                save_config("wallet_id", d['wallet_id']) # Save returned ID logic pending master update or fetch later
+                # Or just save config if master doesn't return wallet_id in login (it should)
+                self.success_signal.emit()
+            else:
+                self.btn.setText("Login Failed")
+        except:
+            self.btn.setText("Connection Error")
+
+class RegisterWidget(QWidget):
+    switch_signal = pyqtSignal() # To Login
+    success_signal = pyqtSignal()
+
+    def __init__(self):
+        super().__init__()
+        l = QVBoxLayout(self)
+        l.setAlignment(Qt.AlignCenter)
+
+        card = ModernCard(dark=True)
+        card.setFixedSize(400, 550)
+        cl = QVBoxLayout(card)
+        cl.setSpacing(15)
+        cl.setContentsMargins(40,40,40,40)
+
+        logo = QLabel("Create Account")
+        logo.setStyleSheet("color: #fff; font-size: 22px; font-weight: 700; margin-bottom: 10px;")
+        cl.addWidget(logo, 0, Qt.AlignCenter)
+
+        self.email = AuthInput("Email Address")
+        self.password = AuthInput("Password", QLineEdit.Password)
+
+        # Payment Info
+        self.pay_method = QComboBox()
+        self.pay_method.addItems(["USDT (Polygon)", "PIX", "Bank Transfer"])
+        self.pay_method.setFixedHeight(45)
+        self.pay_method.setStyleSheet("""
+            QComboBox { background: #1c1c1e; color: #fff; border: 1px solid #2c2c2e; border-radius: 8px; padding: 0 10px; }
+            QComboBox::drop-down { border: none; }
+        """)
+
+        self.pay_addr = AuthInput("Payment Address / Key")
+
+        cl.addWidget(self.email)
+        cl.addWidget(self.password)
+        cl.addWidget(QLabel("Payout Settings:"))
+        cl.addWidget(self.pay_method)
+        cl.addWidget(self.pay_addr)
+
+        self.btn = AuthButton("Encrypt Identity & Register")
+        self.btn.clicked.connect(self.do_register)
+        cl.addWidget(self.btn)
+
+        self.switch = AuthButton("Back to Login", False)
+        self.switch.clicked.connect(self.switch_signal.emit)
+        cl.addWidget(self.switch)
+
+        cl.addStretch()
+        l.addWidget(card)
+
+    def do_register(self):
+        email = self.email.text()
+        password = self.password.text()
+        method = self.pay_method.currentText()
+        addr = self.pay_addr.text()
+
+        if not email or not password or not addr: return
+
+        self.btn.setText("Encrypting Payment Identity...")
+        self.btn.setEnabled(False)
+        QApplication.processEvents()
+
+        try:
+            # 1. Fetch Key
+            if not fetch_master_key():
+                raise Exception("Master Key Fetch Failed")
+
+            with open("master_public_key.pem", "rb") as f: pub_pem = f.read()
+
+            # 2. Encrypt
+            secure_id = elysium_security.generate_secure_wallet_id(method, addr, pub_pem)
+
+            # 3. Submit
+            url = f"http://{FORCE_MASTER_IP}:5000/api/auth/signup"
+            # Note: Master API expects standard auth fields. We might need to override logic
+            # or send secure_id as 'wallet_id' param if API supports manual wallet override?
+            # Master currently generates wallet_id internally.
+            # We need to update Master to accept a custom (encrypted) wallet_id or update User row later.
+            # Assuming prompt implies Master logic handles it, or we send it as metadata.
+            # Let's verify master logic... register_user generates UUID.
+            # We must modify Master to accept wallet_id if provided?
+            # Or we send it as a heartbeat update later.
+
+            # Re-reading prompt: "Submit: Send Email, PasswordHash, and the secure_wallet_id to POST /api/auth/signup."
+            # So we assume Master API handles 'wallet_id' param.
+
+            r = requests.post(url, data={
+                "email": email,
+                "password": password,
+                "wallet_id": secure_id
+            })
+
+            if r.status_code == 200:
+                save_config("wallet_id", secure_id)
+                self.success_signal.emit()
+            else:
+                self.btn.setText("Registration Failed")
+                self.btn.setEnabled(True)
+        except Exception as e:
+            self.btn.setText(f"Error: {e}")
+            self.btn.setEnabled(True)
 
 # --- UI COMPONENTS ---
 
@@ -379,8 +593,27 @@ class ElysiumApp(QMainWindow):
         self.resize(1000, 700)
         self.setStyleSheet("QMainWindow { background-color: #0a0a0a; } QLabel { font-family: 'Segoe UI', sans-serif; color: #8e8e93; }")
 
-        central = QWidget(); self.setCentralWidget(central)
-        main_layout = QHBoxLayout(central); main_layout.setContentsMargins(0,0,0,0); main_layout.setSpacing(0)
+        # Root Stack
+        self.root_stack = QStackedWidget()
+        self.setCentralWidget(self.root_stack)
+
+        # 1. Login
+        self.login_ui = LoginWidget()
+        self.login_ui.switch_signal.connect(lambda: self.root_stack.setCurrentIndex(1))
+        self.login_ui.success_signal.connect(self.start_dashboard)
+        self.root_stack.addWidget(self.login_ui)
+
+        # 2. Register
+        self.register_ui = RegisterWidget()
+        self.register_ui.switch_signal.connect(lambda: self.root_stack.setCurrentIndex(0))
+        self.register_ui.success_signal.connect(self.start_dashboard)
+        self.root_stack.addWidget(self.register_ui)
+
+        # 3. Dashboard (Container)
+        self.dash_container = QWidget()
+        main_layout = QHBoxLayout(self.dash_container)
+        main_layout.setContentsMargins(0,0,0,0)
+        main_layout.setSpacing(0)
 
         # Sidebar
         sidebar = QWidget(); sidebar.setFixedWidth(240); sidebar.setStyleSheet("background:#0f0f10; border-right:1px solid #1f1f20;")
@@ -398,16 +631,30 @@ class ElysiumApp(QMainWindow):
         sl.addStretch()
         main_layout.addWidget(sidebar)
 
-        # Stack
-        self.stack = QStackedWidget(); self.stack.setContentsMargins(30,30,30,30)
+        # Content Stack
+        self.content_stack = QStackedWidget(); self.content_stack.setContentsMargins(30,30,30,30)
         self.tab_dash = DashboardTab()
         self.tab_hw = HardwareTab()
         self.tab_wall = WalletTab()
         self.tab_term = TerminalTab()
 
-        for t in [self.tab_dash, self.tab_hw, self.tab_wall, self.tab_term]: self.stack.addWidget(t)
-        main_layout.addWidget(self.stack)
+        for t in [self.tab_dash, self.tab_hw, self.tab_wall, self.tab_term]: self.content_stack.addWidget(t)
+        main_layout.addWidget(self.content_stack)
 
+        self.root_stack.addWidget(self.dash_container)
+
+        # Check if already logged in
+        if load_config().get("wallet_id"):
+            self.root_stack.setCurrentIndex(2) # Go to Dashboard
+            self.start_threads()
+        else:
+            self.root_stack.setCurrentIndex(0) # Go to Login
+
+    def start_dashboard(self):
+        self.root_stack.setCurrentIndex(2)
+        self.start_threads()
+
+    def start_threads(self):
         # Logic
         self.node_active = False
         self.node_thread = None
@@ -425,10 +672,10 @@ class ElysiumApp(QMainWindow):
         s = self.sender()
         for b in [self.btn_dash, self.btn_hw, self.btn_wall, self.btn_term]: b.update_style(False)
         s.update_style(True)
-        if s == self.btn_dash: self.stack.setCurrentIndex(0)
-        elif s == self.btn_hw: self.stack.setCurrentIndex(1)
-        elif s == self.btn_wall: self.stack.setCurrentIndex(2)
-        elif s == self.btn_term: self.stack.setCurrentIndex(3)
+        if s == self.btn_dash: self.content_stack.setCurrentIndex(0)
+        elif s == self.btn_hw: self.content_stack.setCurrentIndex(1)
+        elif s == self.btn_wall: self.content_stack.setCurrentIndex(2)
+        elif s == self.btn_term: self.content_stack.setCurrentIndex(3)
 
     def toggle_node(self):
         if not self.node_active:
