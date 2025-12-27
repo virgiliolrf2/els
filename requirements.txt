@@ -12,3 +12,4 @@ nvidia-ml-py3
 gputil
 datasets
 pynvml
+boto3

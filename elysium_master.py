@@ -165,10 +165,7 @@ class Orchestrator:
         # Simple assignment for now
         with self.lock:
             for w in workers:
-                self.topology_map[w['worker_id']] = {
-                    "role": "compute",
-                    "data_source": job_spec.get("data_source")
-                }
+                self.topology_map[w['worker_id']] = job_spec
         log_master(f"✅ Mission assigned to {len(workers)} nodes.")
 
 SCHEDULER = Orchestrator()
@@ -273,33 +270,46 @@ def api_logout():
 
 @app.route('/api/job/start', methods=['POST'])
 def api_job_start():
-    if 'user_id' not in flask.session: return jsonify({"status": "forbidden"}), 403
+    # Supports both Form (UI) and JSON (SDK) submission
+    if request.is_json:
+        # SDK Path
+        # No session check for MVP SDK usage (or assume API Key later)
+        spec = request.json
+        job_name = spec.get("TrainingJobName", f"job-{int(time.time())}")
+    else:
+        # UI Path (Form)
+        if 'user_id' not in flask.session: return jsonify({"status": "forbidden"}), 403
 
-    # 1. Specs
-    model = request.form.get("model", "gpt2")
-    source_type = request.form.get("source_type", "hf")
-
-    # 2. Validation
-    log_master(f"🔍 Validating Mission: {model} ({source_type})...")
-    if source_type == "hf":
+        # Construct Spec from Form
+        model = request.form.get("model", "gpt2")
+        mode = request.form.get("mode", "data_parallel")
+        # Validate HF
         try:
             transformers.AutoConfig.from_pretrained(model)
-            # datasets.load_dataset_builder... (simulated validation)
-            log_master("✅ Model Config Valid.")
-        except Exception as e:
-            log_master(f"❌ Invalid Model: {e}")
-            return f"Invalid Model: {e}", 400
+        except Exception as e: return f"Invalid Model: {e}", 400
 
-    # 3. Launch
-    CURRENT_MISSION["job_id"] = f"JOB_{int(time.time())}"
+        job_name = f"JOB_{int(time.time())}"
+        spec = {
+            "TrainingJobName": job_name,
+            "AlgorithmSpecification": {
+                "Framework": "pytorch",
+                "ContainerEntrypoint": ["train.py"] # Default
+            },
+            "HyperParameters": {"mode": mode, "model_name": model},
+            "InputDataConfig": {
+                "train": {"DataSource": {"S3DataSource": {"S3Uri": f"s3://mock-bucket/{uuid.uuid4()}"}}}
+            },
+            "OutputDataConfig": {"S3OutputPath": "s3://elysium-output"}
+        }
+
+    CURRENT_MISSION["job_id"] = job_name
     CURRENT_MISSION["status"] = "ACTIVE"
-    CURRENT_MISSION["mode"] = request.form.get("mode")
+    CURRENT_MISSION["spec"] = spec
 
-    SCHEDULER.schedule_job({
-        "mode": CURRENT_MISSION["mode"],
-        "data_source": {"protocol": "s3", "url": f"https://s3.amazonaws.com/{uuid.uuid4()}"}
-    })
+    log_master(f"🚀 Job Launched: {job_name}")
+    SCHEDULER.schedule_job(spec)
 
+    if request.is_json: return jsonify({"status": "ok", "job_id": job_name})
     return flask.redirect('/dashboard')
 
 # --- UI ---

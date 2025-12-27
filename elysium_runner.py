@@ -120,241 +120,89 @@ def sign_and_publish_metrics(dht, step, loss, velocity, private_key, public_key_
     # Also update global progress key with expiration (Master polls this)
     # dht.store(f"job_{JOB_ID}_progress", step, ...)
 
-# --- DATA STREAMER (PRODUCER) ---
-class DataStreamer:
-    def __init__(self, config):
-        self.config = config
-        self.queue = queue.Queue(maxsize=5) # Infinite Buffer (capped at 5 to save RAM)
-        self.active = True
-        self.worker_id = os.environ.get("ELYSIUM_WORKER_ID", "unknown")
+# --- SAGEMAKER-LIKE EXECUTOR ---
 
-        # Start Producer Thread
-        self.thread = threading.Thread(target=self._producer_loop, daemon=True)
-        self.thread.start()
+class Executor:
+    def __init__(self, spec):
+        self.spec = spec
+        self.base_dir = Path("/opt/ml")
+        self.input_dir = self.base_dir / "input/data"
+        self.model_dir = self.base_dir / "model"
+        self.output_dir = self.base_dir / "output"
+        self.config_dir = self.base_dir / "input/config"
 
-    def _fetch_data(self):
-        """Fetches and decrypts data batch based on protocol."""
-        ds = self.config.get("data_source")
-        if not ds:
-            # Fallback: Random Noise (for testing)
-            return torch.randint(0, 1000, (8, 128))
+        for p in [self.input_dir, self.model_dir, self.output_dir, self.config_dir]:
+            p.mkdir(parents=True, exist_ok=True)
 
-        protocol = ds.get("protocol", "s3")
-        url = ds.get("url")
-        key = ds.get("decryption_key")
+    def prepare(self):
+        print("[EXECUTOR] 📂 Setting up environment...", flush=True)
 
+        # 1. Write Hyperparameters
+        with open(self.config_dir / "hyperparameters.json", "w") as f:
+            json.dump(self.spec.get("HyperParameters", {}), f)
+
+        # 2. Download Data (Mock for MVP)
+        inputs = self.spec.get("InputDataConfig", {})
+        for channel, cfg in inputs.items():
+            print(f"[EXECUTOR] ⬇️ Downloading channel: {channel}...", flush=True)
+            # In real impl, parse S3Uri and download
+            # For MVP, create dummy file
+            c_dir = self.input_dir / channel
+            c_dir.mkdir(exist_ok=True)
+            with open(c_dir / "data.txt", "w") as f: f.write("dummy data")
+
+    def run(self):
+        algo = self.spec.get("AlgorithmSpecification", {})
+        entry_points = algo.get("ContainerEntrypoint", [])
+
+        if not entry_points:
+            print("[EXECUTOR] ❌ No entrypoint defined.", flush=True)
+            return
+
+        cmd = entry_points
+        print(f"[EXECUTOR] 🚀 Executing: {cmd}", flush=True)
+
+        # Set Env Vars
+        env = os.environ.copy()
+        env["SM_MODEL_DIR"] = str(self.model_dir)
+        env["SM_OUTPUT_DATA_DIR"] = str(self.output_dir)
+        env["SM_CHANNEL_TRAIN"] = str(self.input_dir / "train")
+
+        # Execute User Code
         try:
-            # Protocol A: S3/MinIO (Presigned URL)
-            if protocol == "s3":
-                r = requests.get(url, timeout=10)
-                if r.status_code == 403:
-                    print("[STREAM] ⚠️ 403 Forbidden. Link expired. Refreshing...", flush=True)
-                    # TODO: Trigger re-fetch of config from Master
-                    # For MVP, we raise error to retry later
-                    raise ConnectionRefusedError("Expired S3 Link")
-                r.raise_for_status()
-                data_bytes = r.content
+            # Here we assume the entrypoint script exists or is passed.
+            # In a real scenario, we'd download the SourceCode S3Uri.
+            # For MVP, we create a dummy train.py if it's "train.py" and doesn't exist
+            if cmd[0] == "train.py" and not os.path.exists("train.py"):
+                with open("train.py", "w") as f:
+                    f.write("import os; import time; print('Hello form User Script!'); time.sleep(10); print('Done');")
 
-            # Protocol B: Encrypted IPFS
-            elif protocol == "ipfs":
-                # Mock IPFS fetch via gateway
-                gateway = f"https://ipfs.io/ipfs/{url.replace('ipfs://', '')}"
-                r = requests.get(gateway, timeout=30)
-                r.raise_for_status()
-                encrypted_bytes = r.content
-
-                # Decrypt In-Memory (AES/Fernet)
-                if key:
-                    f = Fernet(key.encode())
-                    data_bytes = f.decrypt(encrypted_bytes)
-                else:
-                    data_bytes = encrypted_bytes # Unsafe if public
-
-            else:
-                return torch.randint(0, 1000, (8, 128))
-
-            # Transform bytes to Tensor (Mock logic for text/parquet)
-            # In real life: use pyarrow or safetensors on 'io.BytesIO(data_bytes)'
-            # Here we just use the length to seed randomness to simulate "content"
-            seed = len(data_bytes)
-            torch.manual_seed(seed)
-            return torch.randint(0, 1000, (8, 128))
-
+            subprocess.run(["python"] + cmd, check=True, env=env)
+            print("[EXECUTOR] ✅ Execution Successful.", flush=True)
         except Exception as e:
-            print(f"[STREAM] ❌ Fetch Error: {e}", flush=True)
-            time.sleep(2)
-            return None
+            print(f"[EXECUTOR] ❌ Execution Failed: {e}", flush=True)
 
-    def _producer_loop(self):
-        print("[STREAM] 🚀 Producer Thread Started.", flush=True)
-        while self.active:
-            if not self.queue.full():
-                batch = self._fetch_data()
-                if batch is not None:
-                    self.queue.put(batch)
-                else:
-                    time.sleep(1) # Backoff
-            else:
-                time.sleep(0.1) # Wait for consumer
+    def upload_artifacts(self):
+        print("[EXECUTOR] ⬆️ Uploading artifacts...", flush=True)
+        # Mock Upload
+        pass
 
-    def get_batch(self):
-        """Consumer method called by training loop."""
-        return self.queue.get()
-
-def run_data_parallel(dht, config, private_key, public_key_pem):
-    print("[RUNNER] 🧠 Initializing Data Parallel Training...", flush=True)
-
-    # Load Model (Transformers)
-    model_name = config.get("model_name", "bert-base-uncased")
-    model = transformers.AutoModelForMaskedLM.from_pretrained(model_name)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5)
-
-    # Hivemind Decentralized Optimizer
-    opt = hivemind.Optimizer(
-        dht=dht,
-        run_id=f"{JOB_ID}_run",
-        batch_size_per_step=config.get("batch_size", 32),
-        target_batch_size=1000, # Large batch simulation
-        optimizer=optimizer,
-        use_local_updates=True,
-        matchmaking_time=5.0,
-        averaging_timeout=10.0,
-        verbose=True
-    )
-
-    # Graceful Shutdown Handler
-    def shutdown_handler(signum, frame):
-        print(f"\n[RUNNER] 🛑 Caught signal {signum}. Shutting down optimizer...", flush=True)
-        opt.shutdown()
-        dht.shutdown()
-        sys.exit(0)
-
-    signal.signal(signal.SIGTERM, shutdown_handler)
-    signal.signal(signal.SIGINT, shutdown_handler)
-
-    # Initialize Data Streamer
-    streamer = DataStreamer(config)
-
-    print("[RUNNER] 🚀 Loop Started.", flush=True)
-    step = 0
-    start_time = time.time()
-
-    # Infinite Buffer Loop
-    while step < config.get("target_steps", 100):
-        # Get Data from Queue (Consumer)
-        dummy_input = streamer.get_batch()
-
-        # Training Step
-        optimizer.zero_grad()
-        outputs = model(dummy_input, labels=dummy_input)
-        loss = outputs.loss
-        loss.backward()
-
-        # Hivemind Step (Averaging)
-        opt.step()
-
-        step += 1
-        elapsed = time.time() - start_time
-        velocity = step / elapsed if elapsed > 0 else 0
-
-        if step % 10 == 0:
-            print(f"[RUNNER] Step {step} | Loss: {loss.item():.4f} | Vel: {velocity:.2f} step/s", flush=True)
-            sign_and_publish_metrics(dht, step, loss.item(), velocity, private_key, public_key_pem)
-
-    print("[RUNNER] ✅ Training Complete.", flush=True)
-    opt.shutdown()
-
-def run_model_parallel(dht, config, private_key, public_key_pem):
-    print("[RUNNER] 🧩 Initializing Model Parallel (Layer Serving)...", flush=True)
-
-    model_name = config.get("model_name", "gpt2")
-    layer_start = config.get("layer_start", 0)
-    num_layers = config.get("num_layers", 4)
-
-    # 1. Load Model Config
-    print(f"[RUNNER] Loading config for {model_name}...", flush=True)
-    model_config = transformers.AutoConfig.from_pretrained(model_name)
-
-    # 2. Instantiate Specific Layers (Slice)
-    # This logic assumes a Transformer structure (like GPT/BERT) where we can extract blocks.
-    # For a 70B model, we would use 'accelerate' to init empty and then load weights.
-    # Here we define a simple wrapper to hold the layers.
-
-    # Check for Dynamic Assignment from Master
-    if config.get("dynamic_assignment"):
-        # Overwrite defaults with what Orchestrator assigned
-        layer_start = config["dynamic_assignment"].get("layer_start", layer_start)
-        num_layers = config["dynamic_assignment"].get("num_layers", num_layers)
-        print(f"[RUNNER] 🔄 Dynamic Re-Assignment: Layers {layer_start}-{layer_start+num_layers}", flush=True)
-
-    # Secure Data Streamer (Stub)
-    if config.get("data_source"):
-        ds = config["data_source"]
-        print(f"[RUNNER] 🔒 Initializing Secure Data Stream from {ds.get('s3_bucket')}...", flush=True)
-        # In real impl: boto3.client(...).get_object()
-
-    print(f"[RUNNER] Serving layers {layer_start} to {layer_start + num_layers}...", flush=True)
-
-    class LayerSlice(torch.nn.Module):
-        def __init__(self, config, start, num):
-            super().__init__()
-            # Attempt to find the 'h' or 'layers' attribute typical in Transformers
-            # This is a generic heuristic for MVP.
-            self.layers = torch.nn.ModuleList()
-            # In a real implementation we would load only these weights from disk/stream.
-            # For now, we instantiate fresh layers to simulate memory usage of that slice.
-            # If the model is huge, we'd use meta-device.
-
-            # Using a dummy linear layer stack to simulate compute/memory cost of a Transformer Block
-            hidden_size = getattr(config, 'hidden_size', 768)
-            for _ in range(num):
-                self.layers.append(torch.nn.Linear(hidden_size, hidden_size))
-
-        def forward(self, hidden_states):
-            for layer in self.layers:
-                hidden_states = layer(hidden_states)
-            return hidden_states
-
-    model_slice = LayerSlice(model_config, layer_start, num_layers)
-
-    # 3. Hivemind ModuleBackend
-    # We expose this slice as a remote module.
-    # Peers can call 'dht.run_remote_module(uid, inputs)'
-    uid = f"{JOB_ID}_layers_{layer_start}_{layer_start+num_layers}"
-
-    # Note: hivemind.ModuleBackend requires a specialized forward signature usually.
-    # We wrap it in a ModuleBackend to handle P2P requests.
-
-    backend = hivemind.ModuleBackend(
-        module=model_slice,
-        optimizer=None, # Inference only for this slice example, or add optimizer
-        args_schema=(hivemind.BatchTensorDescriptor((1, model_config.hidden_size), compression=hivemind.Uniform8BitQuantization()),),
-        outputs_schema=hivemind.BatchTensorDescriptor((1, model_config.hidden_size), compression=hivemind.Uniform8BitQuantization()),
-    )
-
-    server = hivemind.Server(dht=dht, module_backends={uid: backend}, num_connection_handlers=10)
-
-    print(f"[RUNNER] 🚀 Serving Module UID: {uid}", flush=True)
-    server.start()
-
-    # Graceful Shutdown Handler for Server
-    def shutdown_server_handler(signum, frame):
-        print(f"\n[RUNNER] 🛑 Caught signal {signum}. Shutting down server...", flush=True)
-        server.shutdown()
-        dht.shutdown()
-        sys.exit(0)
-
-    signal.signal(signal.SIGTERM, shutdown_server_handler)
-    signal.signal(signal.SIGINT, shutdown_server_handler)
-
-    try:
-        while True:
-            time.sleep(5)
-            # Heartbeat showing we are serving
-            sign_and_publish_metrics(dht, 0, 0.0, 1.0, private_key, public_key_pem) # Vel=1.0 means active
-    except Exception as e:
-        print(f"[RUNNER] Error in server loop: {e}", flush=True)
-        server.shutdown()
+def run_executor_mode(spec):
+    exe = Executor(spec)
+    exe.prepare()
+    exe.run()
+    exe.upload_artifacts()
 
 if __name__ == "__main__":
-    main()
+    # Check if config.json exists (mounted by Node)
+    config_path = Path("/app/workspace/config.json")
+    if config_path.exists():
+        with open(config_path) as f:
+            spec = json.load(f)
+        # If it's a new style Job Spec
+        if "AlgorithmSpecification" in spec:
+            run_executor_mode(spec)
+        else:
+            main() # Fallback to old runner logic if needed, or remove
+    else:
+        print("[RUNNER] ❌ No configuration found.", flush=True)
