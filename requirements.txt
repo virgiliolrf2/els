@@ -13,3 +13,4 @@ gputil
 datasets
 pynvml
 boto3
+web3

@@ -5,6 +5,7 @@ import flask
 from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash, check_password_hash
 import elysium_crypto
+import elysium_bank
 
 # --- 1. BOOTLOADER HÍBRIDO (WINDOWS -> WSL) ---
 if os.name == 'nt':
@@ -92,8 +93,8 @@ def init_db():
     conn.execute("CREATE TABLE IF NOT EXISTS workers (worker_id TEXT PRIMARY KEY, last_seen REAL, balance REAL, total_steps INTEGER, public_key TEXT, hardware_specs TEXT, region TEXT, owner_wallet_id TEXT)")
     # Users: Auth + Wallet
     conn.execute("CREATE TABLE IF NOT EXISTS users (email TEXT PRIMARY KEY, password_hash TEXT, wallet_id TEXT UNIQUE, balance REAL DEFAULT 0.0, created_at REAL)")
-    # Withdrawals: Financial Ledger
-    conn.execute("CREATE TABLE IF NOT EXISTS withdrawals (id INTEGER PRIMARY KEY AUTOINCREMENT, wallet_id TEXT, address TEXT, amount REAL, status TEXT, timestamp REAL)")
+    # Withdrawals: Financial Ledger - Added tx_hash
+    conn.execute("CREATE TABLE IF NOT EXISTS withdrawals (id INTEGER PRIMARY KEY AUTOINCREMENT, wallet_id TEXT, address TEXT, amount REAL, status TEXT, timestamp REAL, tx_hash TEXT)")
     # Transactions: History
     conn.execute("CREATE TABLE IF NOT EXISTS transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, wallet_id TEXT, amount REAL, timestamp REAL, description TEXT)")
     conn.commit(); conn.close()
@@ -169,6 +170,7 @@ class Orchestrator:
         log_master(f"✅ Mission assigned to {len(workers)} nodes.")
 
 SCHEDULER = Orchestrator()
+BANK = elysium_bank.ElysiumBank(DB_FILE, real_money=False) # Start in Simulation Mode
 
 # --- HIVEMIND ---
 def start_dht_service():
@@ -244,6 +246,12 @@ def api_withdraw():
             return jsonify({"status": "ok", "message": "Withdrawal Pending"})
         return jsonify({"status": "error", "message": "Insufficient Funds"}), 400
     finally: conn.close()
+
+@app.route('/api/admin/payout', methods=['POST'])
+def api_admin_payout():
+    # In real prod, add Auth check here (admin only)
+    count = BANK.process_pending_withdrawals()
+    return jsonify({"status": "ok", "processed": count})
 
 # --- AUTH & JOB START ---
 @app.route('/api/auth/login', methods=['POST'])
@@ -406,11 +414,14 @@ def dashboard():
         </div>
 
         <div id="p-payouts" class="page">
-            <h1>Payouts & Withdrawals</h1>
+            <div style="display:flex; justify-content:space-between; margin-bottom:20px">
+                <h1>Payouts & Withdrawals</h1>
+                <button class="btn" style="background:#22c55e" onclick="fetch('/api/admin/payout', {method:'POST'}).then(r=>r.json()).then(d=>alert('Processed: '+d.processed))">ADMIN: PROCESS PAYOUTS</button>
+            </div>
             <div class="card">
                 <h3>Withdrawal History</h3>
                 <table>
-                    <thead><tr><th>ID</th><th>Address</th><th>Amount</th><th>Status</th></tr></thead>
+                    <thead><tr><th>ID</th><th>Address</th><th>Amount</th><th>Status</th><th>TX</th></tr></thead>
                     <tbody>
                         {% for t in txs %}
                         <tr>
@@ -418,6 +429,7 @@ def dashboard():
                             <td style="font-family:monospace">{{ t[2] }}</td>
                             <td style="color:var(--success)">${{ "%.2f"|format(t[3]) }}</td>
                             <td>{{ t[4] }}</td>
+                            <td style="font-size:10px">{{ t[6] or '' }}</td>
                         </tr>
                         {% endfor %}
                     </tbody>
