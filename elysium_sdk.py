@@ -4,6 +4,7 @@ import requests
 import time
 import tarfile
 import io
+import shutil
 
 class TrainingInput:
     def __init__(self, source, content_type=None, input_mode="File"):
@@ -36,10 +37,11 @@ class Estimator:
         self.image_uri = image_uri
         self.master_url = os.environ.get("ELYSIUM_MASTER_URL", "http://127.0.0.1:5000")
 
-    def fit(self, inputs, wait=True):
+    def fit(self, inputs, source_dir=None, wait=True):
         """
         Submits the training job to the Elysium Master.
         inputs: dict of channel_name -> TrainingInput
+        source_dir: Path to directory containing training code (optional)
         """
         # 1. Validate Inputs
         if not isinstance(inputs, dict):
@@ -47,7 +49,24 @@ class Estimator:
         if "train" not in inputs:
             raise ValueError("Must provide a 'train' channel in inputs")
 
-        # 2. Serialize Job Spec
+        # 2. Package Source Code
+        code_bytes = None
+        if source_dir:
+            if not os.path.isdir(source_dir): raise ValueError(f"source_dir {source_dir} not found")
+            print(f"📦 Packaging source code from {source_dir}...")
+            bio = io.BytesIO()
+            with tarfile.open(fileobj=bio, mode='w:gz') as tar:
+                tar.add(source_dir, arcname=os.path.basename(source_dir))
+            code_bytes = bio.getvalue()
+        elif os.path.isfile(self.entry_point):
+            # If entry_point is a file path, package it
+            print(f"📦 Packaging entry script {self.entry_point}...")
+            bio = io.BytesIO()
+            with tarfile.open(fileobj=bio, mode='w:gz') as tar:
+                tar.add(self.entry_point, arcname=os.path.basename(self.entry_point))
+            code_bytes = bio.getvalue()
+
+        # 3. Serialize Job Spec
         input_data_config = {k: v.to_dict() for k, v in inputs.items()}
 
         job_spec = {
@@ -56,7 +75,7 @@ class Estimator:
                 "TrainingImage": self.image_uri or "elysium-worker:latest",
                 "TrainingInputMode": "File",
                 "Framework": self.framework,
-                "ContainerEntrypoint": [self.entry_point]
+                "ContainerEntrypoint": [os.path.basename(self.entry_point)]
             },
             "HyperParameters": self.hyperparameters,
             "InputDataConfig": input_data_config,
@@ -67,17 +86,24 @@ class Estimator:
                 "InstanceType": self.instance_type,
                 "InstanceCount": self.instance_count,
                 "VolumeSizeInGB": 30
-            },
-            # In a real SDK, we would upload the source code (entry_point) to S3 here
-            # and pass the S3 URI as 'SourceCode' in the spec.
-            # For MVP, we assume entry_point is available or passed as content.
-            "SourceCode": self.entry_point # Simplified for prototype
+            }
         }
 
         print(f"🚀 Submitting Job: {job_spec['TrainingJobName']}...")
 
         try:
-            r = requests.post(f"{self.master_url}/api/job/start", json=job_spec, timeout=10)
+            files = {}
+            if code_bytes:
+                files = {'code': ('source.tar.gz', code_bytes, 'application/gzip')}
+
+            # Send as Multipart
+            r = requests.post(
+                f"{self.master_url}/api/job/start",
+                data={'spec': json.dumps(job_spec)},
+                files=files,
+                timeout=30
+            )
+
             if r.status_code == 200:
                 print("✅ Job Submitted Successfully.")
                 if wait:

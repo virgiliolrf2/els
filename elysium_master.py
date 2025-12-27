@@ -268,24 +268,40 @@ def api_signup():
 def api_logout():
     flask.session.clear(); return flask.redirect('/')
 
+@app.route('/api/storage/jobs/<job_id>/source.tar.gz')
+def serve_source(job_id):
+    path = STORAGE_DIR / "jobs" / job_id / "source.tar.gz"
+    if path.exists():
+        return flask.send_file(path)
+    return "Not Found", 404
+
 @app.route('/api/job/start', methods=['POST'])
 def api_job_start():
-    # Supports both Form (UI) and JSON (SDK) submission
-    if request.is_json:
-        # SDK Path
-        # No session check for MVP SDK usage (or assume API Key later)
+    # Handle Multipart/Form-Data (SDK with File)
+    if 'spec' in request.form:
+        spec = json.loads(request.form['spec'])
+        job_name = spec.get("TrainingJobName", f"job-{int(time.time())}")
+
+        # Handle Code Upload
+        if 'code' in request.files:
+            f = request.files['code']
+            save_dir = STORAGE_DIR / "jobs" / job_name
+            save_dir.mkdir(parents=True, exist_ok=True)
+            f.save(save_dir / "source.tar.gz")
+            spec['CodeUrl'] = f"/api/storage/jobs/{job_name}/source.tar.gz"
+
+    # Handle Raw JSON (Legacy SDK)
+    elif request.is_json:
         spec = request.json
         job_name = spec.get("TrainingJobName", f"job-{int(time.time())}")
-    else:
-        # UI Path (Form)
-        if 'user_id' not in flask.session: return jsonify({"status": "forbidden"}), 403
 
-        # Construct Spec from Form
+    # Handle UI Form Submission
+    else:
+        if 'user_id' not in flask.session: return jsonify({"status": "forbidden"}), 403
         model = request.form.get("model", "gpt2")
         mode = request.form.get("mode", "data_parallel")
         # Validate HF
-        try:
-            transformers.AutoConfig.from_pretrained(model)
+        try: transformers.AutoConfig.from_pretrained(model)
         except Exception as e: return f"Invalid Model: {e}", 400
 
         job_name = f"JOB_{int(time.time())}"
@@ -293,7 +309,7 @@ def api_job_start():
             "TrainingJobName": job_name,
             "AlgorithmSpecification": {
                 "Framework": "pytorch",
-                "ContainerEntrypoint": ["train.py"] # Default
+                "ContainerEntrypoint": ["train.py"]
             },
             "HyperParameters": {"mode": mode, "model_name": model},
             "InputDataConfig": {
@@ -309,7 +325,8 @@ def api_job_start():
     log_master(f"🚀 Job Launched: {job_name}")
     SCHEDULER.schedule_job(spec)
 
-    if request.is_json: return jsonify({"status": "ok", "job_id": job_name})
+    if request.is_json or 'spec' in request.form:
+        return jsonify({"status": "ok", "job_id": job_name})
     return flask.redirect('/dashboard')
 
 # --- UI ---
