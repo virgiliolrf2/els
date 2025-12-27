@@ -6,6 +6,7 @@ from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash, check_password_hash
 import elysium_crypto
 import elysium_bank
+import elysium_security
 
 # --- 1. BOOTLOADER HÍBRIDO (WINDOWS -> WSL) ---
 if os.name == 'nt':
@@ -75,6 +76,11 @@ LOGO_SVG = """
 DB_FILE = "elysium_ledger_v4.db"
 STORAGE_DIR = Path("./elysium_storage")
 for p in [STORAGE_DIR]: p.mkdir(parents=True, exist_ok=True)
+
+# Generate Payment Keys on Startup
+if not os.path.exists("master_payment_private.pem"):
+    print("[MASTER] 🔑 Generating Payment Keys...")
+    elysium_security.generate_master_keys()
 
 CURRENT_MISSION = {
     "job_id": None,
@@ -246,6 +252,12 @@ def api_secure_config(worker_id):
         cfg = SCHEDULER.topology_map.get(worker_id)
     return jsonify({"status": "ASSIGNED", "config": cfg}) if cfg else jsonify({"status": "WAITING"})
 
+@app.route('/api/config/public_key')
+def api_public_key():
+    if os.path.exists("master_payment_public.pem"):
+        return flask.send_file("master_payment_public.pem")
+    return "Not Found", 404
+
 @app.route('/api/wallet/withdraw', methods=['POST'])
 def api_withdraw():
     addr = request.form.get("address")
@@ -268,6 +280,18 @@ def api_withdraw():
     elif wallet_id:
         conn = sqlite3.connect(DB_FILE)
         try:
+            # Check for Encrypted Wallet ID
+            real_dest = addr
+            if wallet_id.startswith("ELYS-SECure-"):
+                try:
+                    info = elysium_security.decrypt_payment_info(wallet_id, "master_payment_private.pem")
+                    log_master(f"🔓 Decrypted Payment Info: {info['type']} -> {info['account']}")
+                    # For MVP, we still record the public 'addr' request in DB but log the real dest internally
+                    # In real prod, 'addr' in DB should be the decrypted one or kept encrypted
+                except Exception as e:
+                    log_master(f"❌ Decryption Failed: {e}")
+                    return jsonify({"status": "error", "message": "Invalid Secure Wallet ID"}), 400
+
             # Sum Balance
             res = conn.execute("SELECT SUM(balance) FROM workers WHERE owner_wallet_id=?", (wallet_id,)).fetchone()
             total = res[0] if res[0] else 0.0
