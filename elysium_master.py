@@ -313,9 +313,9 @@ def api_job_start():
             },
             "HyperParameters": {"mode": mode, "model_name": model},
             "InputDataConfig": {
-                "train": {"DataSource": {"S3DataSource": {"S3Uri": f"s3://mock-bucket/{uuid.uuid4()}"}}}
+                "train": {"DataSource": {"Uri": f"hf://mock-bucket/{uuid.uuid4()}"}}
             },
-            "OutputDataConfig": {"S3OutputPath": "s3://elysium-output"}
+            "OutputDataConfig": {"OutputPath": "/tmp/output"}
         }
 
     CURRENT_MISSION["job_id"] = job_name

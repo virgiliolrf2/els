@@ -14,13 +14,7 @@ class TrainingInput:
 
     def to_dict(self):
         return {
-            "DataSource": {
-                "S3DataSource": {
-                    "S3Uri": self.source,
-                    "S3DataType": "S3Prefix",
-                    "S3DataDistributionType": "FullyReplicated"
-                }
-            },
+            "DataSource": {"Uri": self.source},
             "ContentType": self.content_type,
             "InputMode": self.input_mode
         }
@@ -37,7 +31,7 @@ class Estimator:
         self.image_uri = image_uri
         self.master_url = os.environ.get("ELYSIUM_MASTER_URL", "http://127.0.0.1:5000")
 
-    def fit(self, inputs, source_dir=None, wait=True):
+    def fit(self, inputs, source_dir=None, secrets=None, wait=True):
         """
         Submits the training job to the Elysium Master.
         inputs: dict of channel_name -> TrainingInput
@@ -80,7 +74,7 @@ class Estimator:
             "HyperParameters": self.hyperparameters,
             "InputDataConfig": input_data_config,
             "OutputDataConfig": {
-                "S3OutputPath": self.output_path or "s3://elysium-artifacts/output"
+                "OutputPath": self.output_path or "/tmp/output"
             },
             "ResourceConfig": {
                 "InstanceType": self.instance_type,
@@ -88,6 +82,10 @@ class Estimator:
                 "VolumeSizeInGB": 30
             }
         }
+
+        # Add Secrets if provided
+        if secrets:
+            job_spec["Secrets"] = secrets
 
         print(f"🚀 Submitting Job: {job_spec['TrainingJobName']}...")
 

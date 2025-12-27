@@ -154,20 +154,49 @@ class Executor:
                 with tarfile.open(fileobj=bio, mode='r:gz') as tar:
                     tar.extractall(path=".")
                 print("[EXECUTOR] ✅ Source Code Extracted.", flush=True)
+
+                # Install Dependencies
+                if os.path.exists("requirements.txt"):
+                    print("[EXECUTOR] 📦 Installing dependencies...", flush=True)
+                    subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
             except Exception as e:
-                print(f"[EXECUTOR] ❌ Failed to download code: {e}", flush=True)
+                print(f"[EXECUTOR] ❌ Failed to download/install code: {e}", flush=True)
 
         # 2. Write Hyperparameters
         with open(self.config_dir / "hyperparameters.json", "w") as f:
             json.dump(self.spec.get("HyperParameters", {}), f)
 
-        # 3. Download Data (Mock for MVP)
+        # 3. Data Loading (Vendor-Agnostic)
         inputs = self.spec.get("InputDataConfig", {})
         for channel, cfg in inputs.items():
-            print(f"[EXECUTOR] ⬇️ Downloading channel: {channel}...", flush=True)
-            c_dir = self.input_dir / channel
-            c_dir.mkdir(exist_ok=True)
-            with open(c_dir / "data.txt", "w") as f: f.write("dummy data")
+            print(f"[EXECUTOR] ⬇️ Loading channel: {channel}...", flush=True)
+            source_uri = cfg.get("DataSource", {}).get("Uri", "")
+
+            if source_uri.startswith("hf://"):
+                # HuggingFace Datasets Streaming
+                try:
+                    import datasets
+                    ds_name = source_uri.replace("hf://", "")
+                    print(f"[EXECUTOR] 🌊 Streaming HF Dataset: {ds_name}")
+                    # Just verify access, real streaming happens in user code usually
+                    # But if we must materialize:
+                    # ds = datasets.load_dataset(ds_name, streaming=True)
+                    # For MVP executor contract, we just log availability
+                except ImportError:
+                    print("[EXECUTOR] ⚠️ datasets library not found.")
+            elif source_uri.startswith("http"):
+                # Generic Download
+                try:
+                    r = requests.get(source_uri, stream=True)
+                    with open(self.input_dir / channel / "data.bin", 'wb') as f:
+                        for chunk in r.iter_content(chunk_size=8192): f.write(chunk)
+                except Exception as e:
+                    print(f"[EXECUTOR] ❌ Failed to download data: {e}")
+            else:
+                # Mock/File
+                c_dir = self.input_dir / channel
+                c_dir.mkdir(exist_ok=True)
+                with open(c_dir / "data.txt", "w") as f: f.write("dummy data")
 
     def run(self):
         algo = self.spec.get("AlgorithmSpecification", {})
@@ -185,6 +214,13 @@ class Executor:
         env["SM_MODEL_DIR"] = str(self.model_dir)
         env["SM_OUTPUT_DATA_DIR"] = str(self.output_dir)
         env["SM_CHANNEL_TRAIN"] = str(self.input_dir / "train")
+
+        # Inject Secrets
+        secrets = self.spec.get("Secrets", {})
+        if secrets:
+            print(f"[EXECUTOR] 🔑 Injecting {len(secrets)} secrets into environment.", flush=True)
+            for k, v in secrets.items():
+                env[k] = str(v)
 
         # Execute User Code
         try:
