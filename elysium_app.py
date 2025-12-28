@@ -10,7 +10,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QPushButton, QLabel,
                              QVBoxLayout, QWidget, QTextEdit, QHBoxLayout, QFrame,
                              QGraphicsDropShadowEffect, QStackedWidget, QListWidget,
                              QListWidgetItem, QProgressBar, QLineEdit, QComboBox,
-                             QSpacerItem, QSizePolicy)
+                             QSpacerItem, QSizePolicy, QCheckBox)
 from PyQt5.QtCore import QThread, pyqtSignal, Qt, QSize, QPoint
 from PyQt5.QtGui import QColor, QFont, QIcon, QCursor
 import hashlib
@@ -44,7 +44,6 @@ def fetch_master_key():
             print("[DEBUG] Master Key saved to master_public_key.pem")
             return True
         else:
-            # Shorten error to avoid HTML spam
             err = r.text[:200] + "..." if len(r.text) > 200 else r.text
             print(f"[DEBUG] Failed to fetch key: {err}")
     except Exception as e:
@@ -86,10 +85,8 @@ class NodeThread(QThread):
                 l = line.strip()
                 self.log_sig.emit(l)
 
-                # Detect IDs from logs: "[INIT] 📝 Registering {wid} (Wallet: {wallet})..."
                 if "[INIT] 📝 Registering" in l and "(Wallet:" in l:
                     try:
-                        # Parse: Registering node_xxx (Wallet: ELYS-YYY)
                         p1 = l.split("Registering ")[1]
                         wid = p1.split(" ")[0]
                         p2 = l.split("(Wallet: ")[1]
@@ -118,11 +115,8 @@ class PollThread(QThread):
     def run(self):
         while True:
             try:
-                # Use stored wallet ID if thread state is empty
                 wid = self.wallet_id or load_config().get("wallet_id")
-
                 if wid:
-                    # In V4.1 Master, balance endpoint uses wallet_id
                     r = requests.get(f"http://127.0.0.1:5000/api/wallet/balance/{wid}", timeout=2)
                     if r.status_code == 200:
                         self.balance_sig.emit(r.json().get('balance', 0.0))
@@ -141,7 +135,6 @@ class HardwareThread(QThread):
 
         while True:
             try:
-                # CPU / RAM
                 cpu = psutil.cpu_percent()
                 ram = psutil.virtual_memory().percent
                 gpu_load = 0
@@ -191,14 +184,12 @@ class TitleBar(QFrame):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(15, 0, 15, 0)
 
-        # Logo
         self.logo = QLabel("ELYSIUM")
         self.logo.setStyleSheet("color: #10B981; font-weight: 900; font-size: 14px; letter-spacing: 1px;")
         layout.addWidget(self.logo)
 
         layout.addStretch()
 
-        # Window Controls
         btn_style = """
             QPushButton { background: transparent; border: none; font-size: 14px; font-weight: bold; color: #6B7280; width: 30px; height: 30px; border-radius: 4px; }
             QPushButton:hover { background: #F3F4F6; color: #1F2937; }
@@ -321,12 +312,11 @@ class LoginWidget(QWidget):
         l.setAlignment(Qt.AlignCenter)
 
         card = ModernCard()
-        card.setFixedSize(400, 480)
+        card.setFixedSize(400, 520)
         cl = QVBoxLayout(card)
         cl.setSpacing(20)
         cl.setContentsMargins(40,40,40,40)
 
-        # Header
         logo = QLabel("Welcome Back")
         logo.setStyleSheet("color: #111827; font-size: 24px; font-weight: 800; margin-bottom: 5px;")
         logo.setAlignment(Qt.AlignCenter)
@@ -339,18 +329,26 @@ class LoginWidget(QWidget):
 
         cl.addSpacing(10)
 
-        # Inputs
         self.email = AuthInput("Email Address")
         self.password = AuthInput("Password", QLineEdit.Password)
+
+        # Pre-fill email
+        saved_email = load_config().get("user_email", "")
+        if saved_email: self.email.setText(saved_email)
+
         cl.addWidget(self.email)
         cl.addWidget(self.password)
 
-        # Submit
+        # Remember Me
+        self.chk_remember = QCheckBox("Remember Me")
+        self.chk_remember.setStyleSheet("color: #6B7280; font-size: 13px;")
+        if saved_email: self.chk_remember.setChecked(True)
+        cl.addWidget(self.chk_remember)
+
         self.btn = AuthButton("Sign In")
         self.btn.clicked.connect(self.do_login)
         cl.addWidget(self.btn)
 
-        # Switch
         self.switch = AuthButton("Create an account", False)
         self.switch.clicked.connect(self.switch_signal.emit)
         cl.addWidget(self.switch)
@@ -362,6 +360,12 @@ class LoginWidget(QWidget):
         email = self.email.text()
         password = self.password.text()
         if not email or not password: return
+
+        # Remember Me Logic
+        if self.chk_remember.isChecked():
+            save_config("user_email", email)
+        else:
+            save_config("user_email", "")
 
         try:
             url = f"http://{FORCE_MASTER_IP}:5000/api/auth/login"
@@ -399,16 +403,9 @@ class RegisterWidget(QWidget):
         self.email = AuthInput("Email Address")
         self.password = AuthInput("Password", QLineEdit.Password)
 
-        # Payment Info
         self.pay_method = QComboBox()
         self.pay_method.addItems([
-            "PIX",
-            "USDT (TRC20)",
-            "USDT (ERC20)",
-            "USDT (Polygon)",
-            "BTC",
-            "PayPal",
-            "Bank Transfer (SWIFT)"
+            "PIX", "USDT (TRC20)", "USDT (ERC20)", "USDT (Polygon)", "BTC", "PayPal", "Bank Transfer (SWIFT)"
         ])
         self.pay_method.setFixedHeight(50)
         self.pay_method.setStyleSheet("""
@@ -459,6 +456,8 @@ class RegisterWidget(QWidget):
 
             if r.status_code == 200:
                 save_config("wallet_id", secure_id)
+                # Also save email for UX
+                save_config("user_email", email)
                 self.success_signal.emit()
             else:
                 self.btn.setText("Failed")
@@ -477,7 +476,6 @@ class DashboardTab(QWidget):
         layout.setSpacing(25)
         layout.setContentsMargins(0,0,0,0)
 
-        # Status Section
         s_card = ModernCard()
         s_layout = QVBoxLayout(s_card)
         s_layout.setContentsMargins(30,30,30,30)
@@ -488,11 +486,9 @@ class DashboardTab(QWidget):
         s_layout.addWidget(self.lbl_status)
         layout.addWidget(s_card)
 
-        # Start Button
         self.btn_start = QPushButton("INITIALIZE NODE")
         self.btn_start.setFixedSize(280, 280)
         self.btn_start.setCursor(Qt.PointingHandCursor)
-        # Circular Button
         self.btn_start.setStyleSheet("""
             QPushButton {
                 background-color: #FFFFFF;
@@ -502,11 +498,8 @@ class DashboardTab(QWidget):
                 font-size: 18px;
                 font-weight: bold;
             }
-            QPushButton:hover {
-                background-color: #ECFDF5;
-            }
+            QPushButton:hover { background-color: #ECFDF5; }
         """)
-        # Shadow for button
         shadow = QGraphicsDropShadowEffect(self.btn_start)
         shadow.setBlurRadius(40); shadow.setYOffset(10); shadow.setColor(QColor(16, 185, 129, 50))
         self.btn_start.setGraphicsEffect(shadow)
@@ -560,7 +553,6 @@ class WalletTab(QWidget):
         super().__init__()
         layout = QVBoxLayout(self)
 
-        # Balance Card
         b_card = ModernCard()
         b_layout = QVBoxLayout(b_card)
         b_layout.setContentsMargins(30,30,30,30)
@@ -570,22 +562,23 @@ class WalletTab(QWidget):
         b_layout.addWidget(self.lbl_bal)
         layout.addWidget(b_card)
 
-        # Address Input
-        layout.addWidget(QLabel("PAYOUT ADDRESS"))
-        self.input_addr = QLineEdit()
-        self.input_addr.setPlaceholderText("Enter your crypto address...")
-        self.input_addr.setStyleSheet("padding: 15px; background: #FFFFFF; color: #1F2937; border: none; border-radius: 12px; font-size: 14px;")
+        layout.addWidget(QLabel("PAYOUT WALLET ID (SECURE)"))
 
-        # Input Shadow
-        ishadow = QGraphicsDropShadowEffect(self.input_addr)
-        ishadow.setBlurRadius(15); ishadow.setYOffset(2); ishadow.setColor(QColor(0,0,0,10))
-        self.input_addr.setGraphicsEffect(ishadow)
+        # Read-Only Wallet Label (Updated UX)
+        self.lbl_wallet_id = QLabel(load_config().get("wallet_id", "Not Linked"))
+        self.lbl_wallet_id.setFixedHeight(50)
+        self.lbl_wallet_id.setStyleSheet("""
+            QLabel {
+                background-color: #F3F4F6;
+                color: #6B7280;
+                border-radius: 8px;
+                padding: 0 15px;
+                font-family: 'Consolas', monospace;
+                font-size: 13px;
+            }
+        """)
+        layout.addWidget(self.lbl_wallet_id)
 
-        self.input_addr.setText(load_config().get("payout_address", ""))
-        self.input_addr.textChanged.connect(lambda: save_config("payout_address", self.input_addr.text()))
-        layout.addWidget(self.input_addr)
-
-        # Progress
         self.lbl_prog = QLabel("Progress: $0.00 / $10.00")
         self.lbl_prog.setStyleSheet("color: #6B7280; font-weight: 600; margin-top: 10px;")
         layout.addWidget(self.lbl_prog)
@@ -596,7 +589,6 @@ class WalletTab(QWidget):
         self.prog_bar.setStyleSheet("QProgressBar{background:#E5E7EB;border-radius:6px} QProgressBar::chunk{background:#10B981;border-radius:6px}")
         layout.addWidget(self.prog_bar)
 
-        # Withdraw Button
         self.btn_withdraw = QPushButton("Min. $10.00 to Withdraw")
         self.btn_withdraw.setFixedHeight(55)
         self.btn_withdraw.setEnabled(False)
@@ -610,8 +602,6 @@ class WalletTab(QWidget):
 
     def update_balance(self, amount):
         self.lbl_bal.setText(f"$ {amount:.4f}")
-
-        # Progress Logic
         p = min(100, int((amount / 10.0) * 100))
         self.prog_bar.setValue(p)
         self.lbl_prog.setText(f"Progress: ${amount:.2f} / $10.00")
@@ -631,11 +621,11 @@ class WalletTab(QWidget):
             """)
 
     def request_payout(self):
-        addr = self.input_addr.text()
         wid = load_config().get("wallet_id")
-        if not addr or not wid: return
+        if not wid: return
         try:
-            r = requests.post("http://127.0.0.1:5000/api/wallet/withdraw", data={"address": addr, "wallet_id": wid})
+            # Address is implicit in Wallet ID now
+            r = requests.post("http://127.0.0.1:5000/api/wallet/withdraw", data={"address": "LINKED_ID", "wallet_id": wid})
             if r.status_code == 200:
                 self.btn_withdraw.setText("REQUEST SENT")
                 self.btn_withdraw.setEnabled(False)
@@ -659,12 +649,47 @@ class TerminalTab(QWidget):
             }
         """)
 
-        # Shadow
         shadow = QGraphicsDropShadowEffect(self.term)
         shadow.setBlurRadius(20); shadow.setYOffset(5); shadow.setColor(QColor(0,0,0,40))
         self.term.setGraphicsEffect(shadow)
 
         layout.addWidget(self.term)
+
+# --- NAVIGATION ---
+
+class ProfileFrame(QFrame):
+    clicked = pyqtSignal()
+    def __init__(self, email):
+        super().__init__()
+        self.setCursor(Qt.PointingHandCursor)
+        self.setStyleSheet("""
+            QFrame { background: #F9FAFB; border-radius: 8px; }
+            QFrame:hover { background: #F3F4F6; }
+        """)
+        pl = QHBoxLayout(self)
+        pl.setContentsMargins(15, 10, 15, 10)
+
+        # Icon
+        icon = QLabel("👤")
+        icon.setStyleSheet("font-size: 18px; border: none; background: transparent;")
+        pl.addWidget(icon)
+
+        # Text Stack
+        vl = QVBoxLayout()
+        vl.setSpacing(2)
+        self.lbl_email = QLabel(email)
+        self.lbl_email.setStyleSheet("font-weight: bold; color: #1F2937; border: none; background: transparent;")
+        vl.addWidget(self.lbl_email)
+
+        self.lbl_status = QLabel("●●●●●●●●") # Masked session indicator
+        self.lbl_status.setStyleSheet("color: #10B981; font-size: 10px; border: none; background: transparent;")
+        vl.addWidget(self.lbl_status)
+
+        pl.addLayout(vl)
+        pl.addStretch()
+
+    def mousePressEvent(self, event):
+        self.clicked.emit()
 
 # --- MAIN WINDOW ---
 
@@ -677,7 +702,6 @@ class ElysiumApp(QMainWindow):
         # Frameless Logic
         self.setWindowFlags(Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setAttribute(Qt.WA_NoSystemBackground)
 
         # Main Layout Container (Rounded & Shadowed)
         self.main_container = QFrame()
@@ -690,52 +714,60 @@ class ElysiumApp(QMainWindow):
             }
         """)
 
-        # Outer Layout for Shadow Margin
         outer_layout = QVBoxLayout()
         outer_layout.setContentsMargins(10, 10, 10, 10)
         outer_layout.addWidget(self.main_container)
 
-        # Shadow for the Window
         window_shadow = QGraphicsDropShadowEffect(self.main_container)
         window_shadow.setBlurRadius(30); window_shadow.setColor(QColor(0,0,0,30))
         self.main_container.setGraphicsEffect(window_shadow)
 
-        # Central Widget Wrapper
         wrapper = QWidget()
         wrapper.setAttribute(Qt.WA_TranslucentBackground)
         wrapper.setStyleSheet("background: transparent;")
         wrapper.setLayout(outer_layout)
         self.setCentralWidget(wrapper)
 
-        # Internal Layout
         self.layout = QVBoxLayout(self.main_container)
         self.layout.setContentsMargins(0,0,0,0)
         self.layout.setSpacing(0)
 
-        # 1. Custom Title Bar
         self.title_bar = TitleBar(self)
         self.layout.addWidget(self.title_bar)
 
-        # 2. Content Stack
         self.root_stack = QStackedWidget()
         self.layout.addWidget(self.root_stack)
 
         # --- SCREENS ---
 
-        # A. Login
         self.login_ui = LoginWidget()
         self.login_ui.switch_signal.connect(lambda: self.root_stack.setCurrentIndex(1))
-        self.login_ui.success_signal.connect(self.start_dashboard)
+        self.login_ui.success_signal.connect(self.init_dashboard)
         self.root_stack.addWidget(self.login_ui)
 
-        # B. Register
         self.register_ui = RegisterWidget()
         self.register_ui.switch_signal.connect(lambda: self.root_stack.setCurrentIndex(0))
-        self.register_ui.success_signal.connect(self.start_dashboard)
+        self.register_ui.success_signal.connect(self.init_dashboard)
         self.root_stack.addWidget(self.register_ui)
 
-        # C. Dashboard
+        # Dashboard Placeholder (Initialized on Login)
         self.dash_container = QWidget()
+        self.root_stack.addWidget(self.dash_container)
+
+        # Check Session
+        if load_config().get("wallet_id"):
+            self.init_dashboard()
+        else:
+            self.root_stack.setCurrentIndex(0)
+
+        self.oldPos = self.pos()
+
+    def init_dashboard(self):
+        # Re-build dashboard to update profile info
+        # Clear existing layout if any
+        if self.dash_container.layout():
+            QWidget().setLayout(self.dash_container.layout()) # Detach hack
+
         dash_layout = QHBoxLayout(self.dash_container)
         dash_layout.setContentsMargins(0,0,0,0)
         dash_layout.setSpacing(0)
@@ -753,13 +785,11 @@ class ElysiumApp(QMainWindow):
             sl.addWidget(b); b.clicked.connect(self.nav)
         sl.addStretch()
 
-        # User Profile Stub
-        prof = QFrame()
-        prof.setStyleSheet("background: #F9FAFB; border-radius: 8px; padding: 10px;")
-        pl = QHBoxLayout(prof)
-        pl.addWidget(QLabel("👤"))
-        pl.addWidget(QLabel("Worker Node"))
-        sl.addWidget(prof)
+        # Profile Section
+        email = load_config().get("user_email", "Worker Node")
+        self.prof = ProfileFrame(email)
+        self.prof.clicked.connect(self.logout)
+        sl.addWidget(self.prof)
 
         dash_layout.addWidget(sidebar)
 
@@ -773,20 +803,15 @@ class ElysiumApp(QMainWindow):
         for t in [self.tab_dash, self.tab_hw, self.tab_wall, self.tab_term]: self.content_stack.addWidget(t)
         dash_layout.addWidget(self.content_stack)
 
-        self.root_stack.addWidget(self.dash_container)
-
-        # Check if already logged in
-        if load_config().get("wallet_id"):
-            self.root_stack.setCurrentIndex(2) # Go to Dashboard
-            self.start_threads()
-        else:
-            self.root_stack.setCurrentIndex(0) # Go to Login
-
-        self.oldPos = self.pos()
-
-    def start_dashboard(self):
         self.root_stack.setCurrentIndex(2)
         self.start_threads()
+
+    def logout(self):
+        # Clear sensitive session data?
+        # For now, we just clear wallet_id in memory (optional) or just switch view.
+        # Requirement says: Trigger Logout
+        save_config("wallet_id", "") # Clear active session
+        self.root_stack.setCurrentIndex(0)
 
     def start_threads(self):
         self.node_active = False
