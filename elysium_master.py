@@ -28,7 +28,8 @@ if os.name == 'nt':
         print(f"[BOOT] ⚠️ Erro na instalação de dependências: {e}")
 
     print(f"[BOOT] 🚀 Lançando Master dentro do Linux (Venv): {wsl_path}")
-    launch_cmd = f"{venv_path}/bin/python3 {wsl_path}"
+    wsl_dir = wsl_path.rsplit('/', 1)[0]
+    launch_cmd = f"cd '{wsl_dir}' && {venv_path}/bin/python3 {wsl_path}"
     subprocess.call(["wsl", "bash", "-c", launch_cmd])
     sys.exit(0)
 
@@ -255,22 +256,33 @@ def api_secure_config(worker_id):
 
 @app.route('/api/config/public_key')
 def api_public_key():
-    key_path = Path(os.getcwd()) / "master_payment_public.pem"
+    # Primary: Absolute path based on script location
+    base_dir = Path(__file__).parent.resolve()
+    key_path = base_dir / "master_payment_public.pem"
 
-    if not key_path.exists():
-        # Auto-heal: Regenerate keys if missing
-        log_master(f"⚠️ Public Key missing at {key_path}. Regenerating...")
+    # Fallback: CWD
+    cwd_path = Path.cwd() / "master_payment_public.pem"
+
+    log_master(f"🔑 Key Request. Checking: {key_path} AND {cwd_path}")
+
+    target_path = key_path
+    if not key_path.exists() and cwd_path.exists():
+        target_path = cwd_path
+
+    if not target_path.exists():
+        log_master(f"⚠️ Key missing. Generating at {key_path}...")
         try:
-            elysium_security.generate_master_keys()
+            priv_path = base_dir / "master_payment_private.pem"
+            elysium_security.generate_master_keys(str(priv_path), str(key_path))
+            target_path = key_path
         except Exception as e:
-            log_master(f"❌ Key Generation Failed: {e}")
-            return f"Key Gen Error: {e}", 500
+            log_master(f"❌ Key Gen Failed: {e}")
+            return f"Error: {e}", 500
 
-    if key_path.exists():
-        return flask.send_file(str(key_path))
+    if target_path.exists():
+        return flask.send_file(str(target_path))
 
-    log_master(f"❌ Public Key still missing after generation attempt at {key_path}")
-    return "Not Found", 404
+    return "Not Found (Check Console)", 404
 
 @app.route('/api/wallet/withdraw', methods=['POST'])
 def api_withdraw():

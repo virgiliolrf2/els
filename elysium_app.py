@@ -44,7 +44,9 @@ def fetch_master_key():
             print("[DEBUG] Master Key saved to master_public_key.pem")
             return True
         else:
-            print(f"[DEBUG] Failed to fetch key: {r.text}")
+            # Shorten error to avoid HTML spam
+            err = r.text[:200] + "..." if len(r.text) > 200 else r.text
+            print(f"[DEBUG] Failed to fetch key: {err}")
     except Exception as e:
         print(f"[DEBUG] Exception in fetch_master_key: {e}")
     return False
@@ -675,6 +677,7 @@ class ElysiumApp(QMainWindow):
         # Frameless Logic
         self.setWindowFlags(Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_NoSystemBackground)
 
         # Main Layout Container (Rounded & Shadowed)
         self.main_container = QFrame()
