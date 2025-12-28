@@ -255,6 +255,11 @@ def api_secure_config(worker_id):
 
 @app.route('/api/config/public_key')
 def api_public_key():
+    if not os.path.exists("master_payment_public.pem"):
+        # Auto-heal: Regenerate keys if missing
+        log_master("⚠️ Public Key missing. Regenerating...")
+        elysium_security.generate_master_keys()
+
     if os.path.exists("master_payment_public.pem"):
         return flask.send_file("master_payment_public.pem")
     return "Not Found", 404

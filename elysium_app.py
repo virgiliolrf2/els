@@ -699,6 +699,8 @@ class ElysiumApp(QMainWindow):
 
         # Central Widget Wrapper
         wrapper = QWidget()
+        wrapper.setAttribute(Qt.WA_TranslucentBackground)
+        wrapper.setStyleSheet("background: transparent;")
         wrapper.setLayout(outer_layout)
         self.setCentralWidget(wrapper)
 
