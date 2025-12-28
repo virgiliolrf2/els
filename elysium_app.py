@@ -682,7 +682,7 @@ class ElysiumApp(QMainWindow):
         self.main_container.setStyleSheet("""
             #MainFrame {
                 background-color: #F9FAFB;
-                border-radius: 16px;
+                border-radius: 0px;
                 border: 1px solid #F3F4F6;
             }
         """)

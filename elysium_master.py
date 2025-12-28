@@ -255,13 +255,21 @@ def api_secure_config(worker_id):
 
 @app.route('/api/config/public_key')
 def api_public_key():
-    if not os.path.exists("master_payment_public.pem"):
-        # Auto-heal: Regenerate keys if missing
-        log_master("⚠️ Public Key missing. Regenerating...")
-        elysium_security.generate_master_keys()
+    key_path = Path(os.getcwd()) / "master_payment_public.pem"
 
-    if os.path.exists("master_payment_public.pem"):
-        return flask.send_file("master_payment_public.pem")
+    if not key_path.exists():
+        # Auto-heal: Regenerate keys if missing
+        log_master(f"⚠️ Public Key missing at {key_path}. Regenerating...")
+        try:
+            elysium_security.generate_master_keys()
+        except Exception as e:
+            log_master(f"❌ Key Generation Failed: {e}")
+            return f"Key Gen Error: {e}", 500
+
+    if key_path.exists():
+        return flask.send_file(str(key_path))
+
+    log_master(f"❌ Public Key still missing after generation attempt at {key_path}")
     return "Not Found", 404
 
 @app.route('/api/wallet/withdraw', methods=['POST'])
