@@ -9,9 +9,10 @@ from pathlib import Path
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QPushButton, QLabel,
                              QVBoxLayout, QWidget, QTextEdit, QHBoxLayout, QFrame,
                              QGraphicsDropShadowEffect, QStackedWidget, QListWidget,
-                             QListWidgetItem, QProgressBar, QLineEdit, QComboBox)
-from PyQt5.QtCore import QThread, pyqtSignal, Qt, QSize
-from PyQt5.QtGui import QColor, QFont, QIcon
+                             QListWidgetItem, QProgressBar, QLineEdit, QComboBox,
+                             QSpacerItem, QSizePolicy)
+from PyQt5.QtCore import QThread, pyqtSignal, Qt, QSize, QPoint
+from PyQt5.QtGui import QColor, QFont, QIcon, QCursor
 import hashlib
 import elysium_security
 
@@ -93,9 +94,6 @@ class NodeThread(QThread):
                         wallet = p2.split(")")[0]
                         self.worker_id_sig.emit(wid)
                         self.wallet_id_sig.emit(wallet)
-
-                        # Auto-save wallet ID
-                        save_config("wallet_id", wallet)
                     except: pass
 
         except Exception as e:
@@ -171,79 +169,173 @@ class HardwareThread(QThread):
             except: pass
             time.sleep(2)
 
-# --- AUTH WIDGETS ---
+# --- UI COMPONENTS ---
+
+class ModernCard(QFrame):
+    def __init__(self, parent=None, color="#FFFFFF"):
+        super().__init__(parent)
+        self.setStyleSheet(f"background-color: {color}; border: none; border-radius: 16px;")
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(25); shadow.setYOffset(5); shadow.setColor(QColor(0,0,0,15))
+        self.setGraphicsEffect(shadow)
+
+class TitleBar(QFrame):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.parent = parent
+        self.setFixedHeight(45)
+        self.setStyleSheet("background-color: #FFFFFF; border-bottom: 1px solid #F3F4F6;")
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(15, 0, 15, 0)
+
+        # Logo
+        self.logo = QLabel("ELYSIUM")
+        self.logo.setStyleSheet("color: #10B981; font-weight: 900; font-size: 14px; letter-spacing: 1px;")
+        layout.addWidget(self.logo)
+
+        layout.addStretch()
+
+        # Window Controls
+        btn_style = """
+            QPushButton { background: transparent; border: none; font-size: 14px; font-weight: bold; color: #6B7280; width: 30px; height: 30px; border-radius: 4px; }
+            QPushButton:hover { background: #F3F4F6; color: #1F2937; }
+        """
+
+        self.btn_min = QPushButton("─")
+        self.btn_min.setStyleSheet(btn_style)
+        self.btn_min.clicked.connect(self.parent.showMinimized)
+
+        self.btn_close = QPushButton("✕")
+        self.btn_close.setStyleSheet(btn_style.replace("#F3F4F6", "#FEE2E2").replace("#1F2937", "#EF4444"))
+        self.btn_close.clicked.connect(self.parent.close)
+
+        layout.addWidget(self.btn_min)
+        layout.addWidget(self.btn_close)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.parent.oldPos = event.globalPos()
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() == Qt.LeftButton:
+            delta = QPoint(event.globalPos() - self.parent.oldPos)
+            self.parent.move(self.parent.x() + delta.x(), self.parent.y() + delta.y())
+            self.parent.oldPos = event.globalPos()
 
 class AuthInput(QLineEdit):
     def __init__(self, placeholder, echo=QLineEdit.Normal):
         super().__init__()
         self.setPlaceholderText(placeholder)
         self.setEchoMode(echo)
-        self.setFixedHeight(45)
+        self.setFixedHeight(50)
         self.setStyleSheet("""
             QLineEdit {
-                background-color: #1c1c1e;
-                border: 1px solid #2c2c2e;
+                background-color: #F3F4F6;
+                border: none;
                 border-radius: 8px;
-                color: #fff;
+                color: #1F2937;
                 padding: 0 15px;
                 font-size: 14px;
             }
             QLineEdit:focus {
-                border: 1px solid #00E676;
+                background-color: #FFFFFF;
+                border: 2px solid #10B981;
             }
         """)
 
 class AuthButton(QPushButton):
     def __init__(self, text, primary=True):
         super().__init__(text)
-        self.setFixedHeight(45)
+        self.setFixedHeight(50)
         self.setCursor(Qt.PointingHandCursor)
         if primary:
             self.setStyleSheet("""
                 QPushButton {
-                    background-color: #00E676;
-                    color: #000;
+                    background-color: #10B981;
+                    color: #FFFFFF;
                     border: none;
                     border-radius: 8px;
                     font-weight: bold;
                     font-size: 14px;
                 }
-                QPushButton:hover { background-color: #00C853; }
+                QPushButton:hover { background-color: #059669; }
             """)
         else:
             self.setStyleSheet("""
                 QPushButton {
                     background-color: transparent;
-                    color: #8e8e93;
+                    color: #6B7280;
                     border: none;
-                    font-size: 12px;
+                    font-size: 13px;
                 }
-                QPushButton:hover { color: #fff; }
+                QPushButton:hover { color: #111827; }
             """)
 
+class SidebarButton(QPushButton):
+    def __init__(self, text, icon_char, active=False):
+        super().__init__()
+        self.setCheckable(True)
+        self.setText(f"  {icon_char}   {text}")
+        self.setFixedHeight(50)
+        self.setCursor(Qt.PointingHandCursor)
+        self.update_style(active)
+
+    def update_style(self, active):
+        if active:
+            self.setStyleSheet("""
+                QPushButton {
+                    background-color: #ECFDF5;
+                    color: #10B981;
+                    border: none;
+                    border-radius: 8px;
+                    text-align: left;
+                    padding-left: 20px;
+                    font-weight: bold;
+                }
+            """)
+        else:
+            self.setStyleSheet("""
+                QPushButton {
+                    background-color: transparent;
+                    color: #6B7280;
+                    border: none;
+                    border-radius: 8px;
+                    text-align: left;
+                    padding-left: 20px;
+                }
+                QPushButton:hover { background-color: #F9FAFB; color: #374151; }
+            """)
+
+# --- AUTH WIDGETS ---
+
 class LoginWidget(QWidget):
-    switch_signal = pyqtSignal() # To Register
-    success_signal = pyqtSignal() # To Dashboard
+    switch_signal = pyqtSignal()
+    success_signal = pyqtSignal()
 
     def __init__(self):
         super().__init__()
         l = QVBoxLayout(self)
         l.setAlignment(Qt.AlignCenter)
 
-        card = ModernCard(dark=True)
-        card.setFixedSize(400, 450)
+        card = ModernCard()
+        card.setFixedSize(400, 480)
         cl = QVBoxLayout(card)
-        cl.setSpacing(15)
+        cl.setSpacing(20)
         cl.setContentsMargins(40,40,40,40)
 
         # Header
-        logo = QLabel("ELYSIUM")
-        logo.setStyleSheet("color: #fff; font-size: 24px; font-weight: 900; margin-bottom: 5px;")
-        cl.addWidget(logo, 0, Qt.AlignCenter)
+        logo = QLabel("Welcome Back")
+        logo.setStyleSheet("color: #111827; font-size: 24px; font-weight: 800; margin-bottom: 5px;")
+        logo.setAlignment(Qt.AlignCenter)
+        cl.addWidget(logo)
 
-        sub = QLabel("Sign in to your worker node")
-        sub.setStyleSheet("color: #8e8e93; font-size: 14px; margin-bottom: 20px;")
-        cl.addWidget(sub, 0, Qt.AlignCenter)
+        sub = QLabel("Sign in to your compute node")
+        sub.setStyleSheet("color: #6B7280; font-size: 14px;")
+        sub.setAlignment(Qt.AlignCenter)
+        cl.addWidget(sub)
+
+        cl.addSpacing(10)
 
         # Inputs
         self.email = AuthInput("Email Address")
@@ -257,7 +349,7 @@ class LoginWidget(QWidget):
         cl.addWidget(self.btn)
 
         # Switch
-        self.switch = AuthButton("Don't have an account? Create one", False)
+        self.switch = AuthButton("Create an account", False)
         self.switch.clicked.connect(self.switch_signal.emit)
         cl.addWidget(self.switch)
 
@@ -274,8 +366,8 @@ class LoginWidget(QWidget):
             r = requests.post(url, data={"email": email, "password": password})
             if r.status_code == 200:
                 d = r.json()
-                save_config("wallet_id", d['wallet_id']) # Save returned ID logic pending master update or fetch later
-                # Or just save config if master doesn't return wallet_id in login (it should)
+                if 'wallet_id' in d:
+                    save_config("wallet_id", d['wallet_id'])
                 self.success_signal.emit()
             else:
                 self.btn.setText("Login Failed")
@@ -283,7 +375,7 @@ class LoginWidget(QWidget):
             self.btn.setText("Connection Error")
 
 class RegisterWidget(QWidget):
-    switch_signal = pyqtSignal() # To Login
+    switch_signal = pyqtSignal()
     success_signal = pyqtSignal()
 
     def __init__(self):
@@ -291,15 +383,16 @@ class RegisterWidget(QWidget):
         l = QVBoxLayout(self)
         l.setAlignment(Qt.AlignCenter)
 
-        card = ModernCard(dark=True)
-        card.setFixedSize(400, 550)
+        card = ModernCard()
+        card.setFixedSize(420, 600)
         cl = QVBoxLayout(card)
         cl.setSpacing(15)
         cl.setContentsMargins(40,40,40,40)
 
-        logo = QLabel("Create Account")
-        logo.setStyleSheet("color: #fff; font-size: 22px; font-weight: 700; margin-bottom: 10px;")
-        cl.addWidget(logo, 0, Qt.AlignCenter)
+        logo = QLabel("Join Elysium")
+        logo.setStyleSheet("color: #111827; font-size: 24px; font-weight: 800;")
+        logo.setAlignment(Qt.AlignCenter)
+        cl.addWidget(logo)
 
         self.email = AuthInput("Email Address")
         self.password = AuthInput("Password", QLineEdit.Password)
@@ -315,9 +408,9 @@ class RegisterWidget(QWidget):
             "PayPal",
             "Bank Transfer (SWIFT)"
         ])
-        self.pay_method.setFixedHeight(45)
+        self.pay_method.setFixedHeight(50)
         self.pay_method.setStyleSheet("""
-            QComboBox { background: #1c1c1e; color: #fff; border: 1px solid #2c2c2e; border-radius: 8px; padding: 0 10px; }
+            QComboBox { background: #F3F4F6; color: #1F2937; border: none; border-radius: 8px; padding: 0 15px; font-size: 14px; }
             QComboBox::drop-down { border: none; }
         """)
 
@@ -325,11 +418,11 @@ class RegisterWidget(QWidget):
 
         cl.addWidget(self.email)
         cl.addWidget(self.password)
-        cl.addWidget(QLabel("Payout Settings:"))
+        cl.addWidget(QLabel("Payout Method:"))
         cl.addWidget(self.pay_method)
         cl.addWidget(self.pay_addr)
 
-        self.btn = AuthButton("Encrypt Identity & Register")
+        self.btn = AuthButton("Encrypt & Register")
         self.btn.clicked.connect(self.do_register)
         cl.addWidget(self.btn)
 
@@ -348,98 +441,73 @@ class RegisterWidget(QWidget):
 
         if not email or not password or not addr: return
 
-        self.btn.setText("Encrypting Payment Identity...")
+        self.btn.setText("Encrypting...")
         self.btn.setEnabled(False)
         QApplication.processEvents()
 
         try:
-            # 1. Fetch Key
             if not fetch_master_key():
                 raise Exception("Master Key Fetch Failed")
 
             with open("master_public_key.pem", "rb") as f: pub_pem = f.read()
-
-            # 2. Encrypt
             secure_id = elysium_security.generate_secure_wallet_id(method, addr, pub_pem)
 
-            # 3. Submit
             url = f"http://{FORCE_MASTER_IP}:5000/api/auth/signup"
-            # Note: Master API expects standard auth fields. We might need to override logic
-            # or send secure_id as 'wallet_id' param if API supports manual wallet override?
-            # Master currently generates wallet_id internally.
-            # We need to update Master to accept a custom (encrypted) wallet_id or update User row later.
-            # Assuming prompt implies Master logic handles it, or we send it as metadata.
-            # Let's verify master logic... register_user generates UUID.
-            # We must modify Master to accept wallet_id if provided?
-            # Or we send it as a heartbeat update later.
-
-            # Re-reading prompt: "Submit: Send Email, PasswordHash, and the secure_wallet_id to POST /api/auth/signup."
-            # So we assume Master API handles 'wallet_id' param.
-
-            r = requests.post(url, data={
-                "email": email,
-                "password": password,
-                "wallet_id": secure_id
-            })
+            r = requests.post(url, data={"email": email, "password": password, "wallet_id": secure_id})
 
             if r.status_code == 200:
                 save_config("wallet_id", secure_id)
                 self.success_signal.emit()
             else:
-                self.btn.setText("Registration Failed")
+                self.btn.setText("Failed")
                 self.btn.setEnabled(True)
         except Exception as e:
-            self.btn.setText(f"Error: {e}")
+            self.btn.setText(f"Error")
+            print(f"Reg Error: {e}")
             self.btn.setEnabled(True)
 
-# --- UI COMPONENTS ---
-
-class ModernCard(QFrame):
-    def __init__(self, parent=None, dark=False):
-        super().__init__(parent)
-        bg = '#0a0a0a' if dark else '#1c1c1e'
-        self.setStyleSheet(f"background-color: {bg}; border: 1px solid #2c2c2e; border-radius: 12px;")
-        shadow = QGraphicsDropShadowEffect(self)
-        shadow.setBlurRadius(20); shadow.setYOffset(4); shadow.setColor(QColor(0,0,0,100))
-        self.setGraphicsEffect(shadow)
-
-class SidebarButton(QPushButton):
-    def __init__(self, text, icon_char, active=False):
-        super().__init__()
-        self.setCheckable(True)
-        self.setText(f"  {icon_char}   {text}")
-        self.setFixedHeight(50)
-        self.setCursor(Qt.PointingHandCursor)
-        self.update_style(active)
-
-    def update_style(self, active):
-        if active:
-            self.setStyleSheet("background-color: rgba(0,230,118,0.1); color: #00E676; border: none; border-radius: 8px; text-align: left; padding-left: 20px; font-weight: bold;")
-        else:
-            self.setStyleSheet("background-color: transparent; color: #8e8e93; border: none; border-radius: 8px; text-align: left; padding-left: 20px;")
-
-# --- TABS ---
+# --- DASHBOARD TABS ---
 
 class DashboardTab(QWidget):
     def __init__(self):
         super().__init__()
         layout = QVBoxLayout(self)
-        layout.setSpacing(20)
+        layout.setSpacing(25)
+        layout.setContentsMargins(0,0,0,0)
 
-        # Status Card
+        # Status Section
         s_card = ModernCard()
         s_layout = QVBoxLayout(s_card)
+        s_layout.setContentsMargins(30,30,30,30)
+
         s_layout.addWidget(QLabel("NODE STATUS"))
         self.lbl_status = QLabel("STANDBY")
-        self.lbl_status.setStyleSheet("color: #8e8e93; font-size: 24px; font-weight: bold;")
+        self.lbl_status.setStyleSheet("color: #9CA3AF; font-size: 32px; font-weight: 800;")
         s_layout.addWidget(self.lbl_status)
         layout.addWidget(s_card)
 
         # Start Button
         self.btn_start = QPushButton("INITIALIZE NODE")
-        self.btn_start.setFixedSize(300, 80)
+        self.btn_start.setFixedSize(280, 280)
         self.btn_start.setCursor(Qt.PointingHandCursor)
-        self.btn_start.setStyleSheet("background-color: #1c1c1e; color: #00E676; border: 2px solid #00E676; border-radius: 40px; font-size: 18px; font-weight: bold;")
+        # Circular Button
+        self.btn_start.setStyleSheet("""
+            QPushButton {
+                background-color: #FFFFFF;
+                color: #10B981;
+                border: 4px solid #10B981;
+                border-radius: 140px;
+                font-size: 18px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #ECFDF5;
+            }
+        """)
+        # Shadow for button
+        shadow = QGraphicsDropShadowEffect(self.btn_start)
+        shadow.setBlurRadius(40); shadow.setYOffset(10); shadow.setColor(QColor(16, 185, 129, 50))
+        self.btn_start.setGraphicsEffect(shadow)
 
         btn_container = QHBoxLayout()
         btn_container.addStretch()
@@ -455,18 +523,20 @@ class HardwareTab(QWidget):
         layout = QVBoxLayout(self)
 
         self.lbl_mode = QLabel("DETECTING HARDWARE...")
-        self.lbl_mode.setStyleSheet("font-size: 14px; color: #fff; margin-bottom: 20px;")
+        self.lbl_mode.setStyleSheet("font-size: 16px; color: #374151; margin-bottom: 20px; font-weight: 600;")
         layout.addWidget(self.lbl_mode)
 
         def make_bar(title, unit):
             w = ModernCard()
+            w.setFixedHeight(100)
             l = QVBoxLayout(w)
+            l.setContentsMargins(20,20,20,20)
             h = QHBoxLayout()
             h.addWidget(QLabel(title)); h.addStretch();
-            val = QLabel("0"); h.addWidget(val); h.addWidget(QLabel(unit))
+            val = QLabel("0"); val.setStyleSheet("font-weight: bold; color: #1F2937;"); h.addWidget(val); h.addWidget(QLabel(unit))
             l.addLayout(h)
-            bar = QProgressBar(); bar.setFixedHeight(6); bar.setTextVisible(False)
-            bar.setStyleSheet("QProgressBar{background:#2c2c2e;border-radius:3px} QProgressBar::chunk{background:#00E676;border-radius:3px}")
+            bar = QProgressBar(); bar.setFixedHeight(8); bar.setTextVisible(False)
+            bar.setStyleSheet("QProgressBar{background:#F3F4F6;border-radius:4px} QProgressBar::chunk{background:#10B981;border-radius:4px}")
             l.addWidget(bar)
             return w, val, bar
 
@@ -484,8 +554,6 @@ class HardwareTab(QWidget):
         layout.addStretch()
 
 class WalletTab(QWidget):
-    withdraw_signal = pyqtSignal(str) # address
-
     def __init__(self):
         super().__init__()
         layout = QVBoxLayout(self)
@@ -493,43 +561,52 @@ class WalletTab(QWidget):
         # Balance Card
         b_card = ModernCard()
         b_layout = QVBoxLayout(b_card)
+        b_layout.setContentsMargins(30,30,30,30)
         b_layout.addWidget(QLabel("UNPAID BALANCE"))
         self.lbl_bal = QLabel("$ 0.0000")
-        self.lbl_bal.setStyleSheet("color: #fff; font-size: 48px; font-weight: 600;")
+        self.lbl_bal.setStyleSheet("color: #111827; font-size: 56px; font-weight: 800;")
         b_layout.addWidget(self.lbl_bal)
         layout.addWidget(b_card)
 
         # Address Input
-        layout.addWidget(QLabel("PAYOUT ADDRESS (USDT/BTC/PIX)"))
+        layout.addWidget(QLabel("PAYOUT ADDRESS"))
         self.input_addr = QLineEdit()
         self.input_addr.setPlaceholderText("Enter your crypto address...")
-        self.input_addr.setStyleSheet("padding: 12px; background: #1c1c1e; color: #fff; border: 1px solid #2c2c2e; border-radius: 8px;")
+        self.input_addr.setStyleSheet("padding: 15px; background: #FFFFFF; color: #1F2937; border: none; border-radius: 12px; font-size: 14px;")
+
+        # Input Shadow
+        ishadow = QGraphicsDropShadowEffect(self.input_addr)
+        ishadow.setBlurRadius(15); ishadow.setYOffset(2); ishadow.setColor(QColor(0,0,0,10))
+        self.input_addr.setGraphicsEffect(ishadow)
+
         self.input_addr.setText(load_config().get("payout_address", ""))
         self.input_addr.textChanged.connect(lambda: save_config("payout_address", self.input_addr.text()))
         layout.addWidget(self.input_addr)
 
         # Progress
         self.lbl_prog = QLabel("Progress: $0.00 / $10.00")
+        self.lbl_prog.setStyleSheet("color: #6B7280; font-weight: 600; margin-top: 10px;")
         layout.addWidget(self.lbl_prog)
+
         self.prog_bar = QProgressBar()
-        self.prog_bar.setFixedHeight(10)
+        self.prog_bar.setFixedHeight(12)
         self.prog_bar.setTextVisible(False)
-        self.prog_bar.setStyleSheet("QProgressBar{background:#2c2c2e;border-radius:5px} QProgressBar::chunk{background:#00E676;border-radius:5px}")
+        self.prog_bar.setStyleSheet("QProgressBar{background:#E5E7EB;border-radius:6px} QProgressBar::chunk{background:#10B981;border-radius:6px}")
         layout.addWidget(self.prog_bar)
 
         # Withdraw Button
         self.btn_withdraw = QPushButton("Min. $10.00 to Withdraw")
-        self.btn_withdraw.setFixedHeight(50)
+        self.btn_withdraw.setFixedHeight(55)
         self.btn_withdraw.setEnabled(False)
-        self.btn_withdraw.setStyleSheet("background: #2c2c2e; color: #8e8e93; border: none; border-radius: 8px; font-weight: bold;")
+        self.btn_withdraw.setStyleSheet("""
+            QPushButton { background: #E5E7EB; color: #9CA3AF; border: none; border-radius: 12px; font-weight: bold; font-size: 14px; margin-top: 20px; }
+        """)
         self.btn_withdraw.clicked.connect(self.request_payout)
         layout.addWidget(self.btn_withdraw)
 
         layout.addStretch()
-        self.current_balance = 0.0
 
     def update_balance(self, amount):
-        self.current_balance = amount
         self.lbl_bal.setText(f"$ {amount:.4f}")
 
         # Progress Logic
@@ -540,46 +617,19 @@ class WalletTab(QWidget):
         if amount >= 10.0:
             self.btn_withdraw.setEnabled(True)
             self.btn_withdraw.setText("REQUEST PAYOUT")
-            self.btn_withdraw.setStyleSheet("background: #00E676; color: #000; border: none; border-radius: 8px; font-weight: bold;")
+            self.btn_withdraw.setStyleSheet("""
+                QPushButton { background: #10B981; color: #FFFFFF; border: none; border-radius: 12px; font-weight: bold; font-size: 14px; margin-top: 20px; }
+                QPushButton:hover { background: #059669; }
+            """)
         else:
             self.btn_withdraw.setEnabled(False)
             self.btn_withdraw.setText(f"Min. $10.00 ({((amount/10)*100):.0f}%)")
-            self.btn_withdraw.setStyleSheet("background: #2c2c2e; color: #8e8e93; border: none; border-radius: 8px; font-weight: bold;")
+            self.btn_withdraw.setStyleSheet("""
+                QPushButton { background: #E5E7EB; color: #9CA3AF; border: none; border-radius: 12px; font-weight: bold; font-size: 14px; margin-top: 20px; }
+            """)
 
     def request_payout(self):
         addr = self.input_addr.text()
-
-        # Security Upgrade: Encrypt the destination inside a new Wallet ID if possible
-        # This replaces the static wallet_id with a dynamic secure token for this transaction
-        if fetch_master_key() and os.path.exists("master_public_key.pem"):
-            try:
-                with open("master_public_key.pem", "rb") as f: pub_pem = f.read()
-                # We use the user's input address as the secret payload
-                secure_id = elysium_security.generate_secure_wallet_id("CRYPTO", addr, pub_pem)
-                # We use the secure ID as the 'wallet_id' parameter to identify the request context,
-                # OR we send it as a new param. The Master logic currently expects 'wallet_id' to match the worker owner.
-                # Use strict logic: The wallet_id MUST match the worker's owner_wallet_id for balance check.
-                # So we can't change the wallet_id on the fly for *identification*.
-                # We must use the secure ID as the *destination*.
-
-                # Re-reading prompt: "The Wallet ID IS the cofre".
-                # This implies the worker registered with this Secure ID.
-                # If we are changing it now, we need to migrate balance? Complex for MVP.
-                # FALLBACK for MVP: Send the secure payload as the 'address' field.
-
-                # However, the prompt says "generate_secure_wallet_id" logic.
-                # Let's assume for this step we send the secure blob as the address,
-                # preserving the original wallet_id for auth/balance check.
-
-                # Actually, the prompt says "The Wallet ID itself is the container".
-                # This means the Node should have registered with this ID initially.
-                # Since we are in the App (Client), we might be too late to change the ID used for mining.
-                # Let's implement the Encryption for the *Withdrawal Address* specifically here.
-                pass
-            except Exception as e:
-                print(f"Encryption Error: {e}")
-
-        # Retrieve wallet_id from parent app context or file
         wid = load_config().get("wallet_id")
         if not addr or not wid: return
         try:
@@ -595,7 +645,23 @@ class TerminalTab(QWidget):
         layout = QVBoxLayout(self)
         self.term = QTextEdit()
         self.term.setReadOnly(True)
-        self.term.setStyleSheet("background-color: #0a0a0a; color: #00E676; font-family: 'Consolas', monospace; border: 1px solid #2c2c2e; border-radius: 12px; padding: 15px;")
+        self.term.setStyleSheet("""
+            QTextEdit {
+                background-color: #111827;
+                color: #34D399;
+                font-family: 'Consolas', monospace;
+                border: none;
+                border-radius: 12px;
+                padding: 20px;
+                font-size: 13px;
+            }
+        """)
+
+        # Shadow
+        shadow = QGraphicsDropShadowEffect(self.term)
+        shadow.setBlurRadius(20); shadow.setYOffset(5); shadow.setColor(QColor(0,0,0,40))
+        self.term.setGraphicsEffect(shadow)
+
         layout.addWidget(self.term)
 
 # --- MAIN WINDOW ---
@@ -604,36 +670,74 @@ class ElysiumApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("ELYSIUM PROVIDER CLIENT")
-        self.resize(1000, 700)
-        self.setStyleSheet("QMainWindow { background-color: #0a0a0a; } QLabel { font-family: 'Segoe UI', sans-serif; color: #8e8e93; }")
+        self.resize(1100, 750)
 
-        # Root Stack
+        # Frameless Logic
+        self.setWindowFlags(Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+
+        # Main Layout Container (Rounded & Shadowed)
+        self.main_container = QFrame()
+        self.main_container.setObjectName("MainFrame")
+        self.main_container.setStyleSheet("""
+            #MainFrame {
+                background-color: #F9FAFB;
+                border-radius: 16px;
+                border: 1px solid #F3F4F6;
+            }
+        """)
+
+        # Outer Layout for Shadow Margin
+        outer_layout = QVBoxLayout()
+        outer_layout.setContentsMargins(10, 10, 10, 10)
+        outer_layout.addWidget(self.main_container)
+
+        # Shadow for the Window
+        window_shadow = QGraphicsDropShadowEffect(self.main_container)
+        window_shadow.setBlurRadius(30); window_shadow.setColor(QColor(0,0,0,30))
+        self.main_container.setGraphicsEffect(window_shadow)
+
+        # Central Widget Wrapper
+        wrapper = QWidget()
+        wrapper.setLayout(outer_layout)
+        self.setCentralWidget(wrapper)
+
+        # Internal Layout
+        self.layout = QVBoxLayout(self.main_container)
+        self.layout.setContentsMargins(0,0,0,0)
+        self.layout.setSpacing(0)
+
+        # 1. Custom Title Bar
+        self.title_bar = TitleBar(self)
+        self.layout.addWidget(self.title_bar)
+
+        # 2. Content Stack
         self.root_stack = QStackedWidget()
-        self.setCentralWidget(self.root_stack)
+        self.layout.addWidget(self.root_stack)
 
-        # 1. Login
+        # --- SCREENS ---
+
+        # A. Login
         self.login_ui = LoginWidget()
         self.login_ui.switch_signal.connect(lambda: self.root_stack.setCurrentIndex(1))
         self.login_ui.success_signal.connect(self.start_dashboard)
         self.root_stack.addWidget(self.login_ui)
 
-        # 2. Register
+        # B. Register
         self.register_ui = RegisterWidget()
         self.register_ui.switch_signal.connect(lambda: self.root_stack.setCurrentIndex(0))
         self.register_ui.success_signal.connect(self.start_dashboard)
         self.root_stack.addWidget(self.register_ui)
 
-        # 3. Dashboard (Container)
+        # C. Dashboard
         self.dash_container = QWidget()
-        main_layout = QHBoxLayout(self.dash_container)
-        main_layout.setContentsMargins(0,0,0,0)
-        main_layout.setSpacing(0)
+        dash_layout = QHBoxLayout(self.dash_container)
+        dash_layout.setContentsMargins(0,0,0,0)
+        dash_layout.setSpacing(0)
 
         # Sidebar
-        sidebar = QWidget(); sidebar.setFixedWidth(240); sidebar.setStyleSheet("background:#0f0f10; border-right:1px solid #1f1f20;")
+        sidebar = QWidget(); sidebar.setFixedWidth(250); sidebar.setStyleSheet("background:#FFFFFF; border-right:1px solid #F3F4F6;")
         sl = QVBoxLayout(sidebar); sl.setContentsMargins(20,40,20,20); sl.setSpacing(10)
-        logo = QLabel("ELYSIUM"); logo.setStyleSheet("color:#fff; font-size:20px; font-weight:900; margin-bottom:20px")
-        sl.addWidget(logo)
 
         self.btn_dash = SidebarButton("Dashboard", "⚡", True)
         self.btn_hw = SidebarButton("Hardware", "🔋")
@@ -643,17 +747,26 @@ class ElysiumApp(QMainWindow):
         for b in [self.btn_dash, self.btn_hw, self.btn_wall, self.btn_term]:
             sl.addWidget(b); b.clicked.connect(self.nav)
         sl.addStretch()
-        main_layout.addWidget(sidebar)
+
+        # User Profile Stub
+        prof = QFrame()
+        prof.setStyleSheet("background: #F9FAFB; border-radius: 8px; padding: 10px;")
+        pl = QHBoxLayout(prof)
+        pl.addWidget(QLabel("👤"))
+        pl.addWidget(QLabel("Worker Node"))
+        sl.addWidget(prof)
+
+        dash_layout.addWidget(sidebar)
 
         # Content Stack
-        self.content_stack = QStackedWidget(); self.content_stack.setContentsMargins(30,30,30,30)
+        self.content_stack = QStackedWidget(); self.content_stack.setContentsMargins(40,40,40,40)
         self.tab_dash = DashboardTab()
         self.tab_hw = HardwareTab()
         self.tab_wall = WalletTab()
         self.tab_term = TerminalTab()
 
         for t in [self.tab_dash, self.tab_hw, self.tab_wall, self.tab_term]: self.content_stack.addWidget(t)
-        main_layout.addWidget(self.content_stack)
+        dash_layout.addWidget(self.content_stack)
 
         self.root_stack.addWidget(self.dash_container)
 
@@ -664,12 +777,13 @@ class ElysiumApp(QMainWindow):
         else:
             self.root_stack.setCurrentIndex(0) # Go to Login
 
+        self.oldPos = self.pos()
+
     def start_dashboard(self):
         self.root_stack.setCurrentIndex(2)
         self.start_threads()
 
     def start_threads(self):
-        # Logic
         self.node_active = False
         self.node_thread = None
         self.tab_dash.btn_start.clicked.connect(self.toggle_node)
@@ -700,21 +814,41 @@ class ElysiumApp(QMainWindow):
             self.node_active = True
 
             self.tab_dash.lbl_status.setText("ONLINE")
-            self.tab_dash.lbl_status.setStyleSheet("color:#00E676; font-size:24px; font-weight:bold")
+            self.tab_dash.lbl_status.setStyleSheet("color:#10B981; font-size:32px; font-weight:800")
             self.tab_dash.btn_start.setText("STOP NODE")
-            self.tab_dash.btn_start.setStyleSheet("background:#1c1c1e; color:#ff4444; border:2px solid #ff4444; border-radius:40px; font-size:18px; font-weight:bold")
+            self.tab_dash.btn_start.setStyleSheet("""
+                QPushButton {
+                    background-color: #FFFFFF;
+                    color: #EF4444;
+                    border: 4px solid #EF4444;
+                    border-radius: 140px;
+                    font-size: 18px;
+                    font-weight: bold;
+                }
+                QPushButton:hover { background-color: #FEF2F2; }
+            """)
         else:
             if self.node_thread: self.node_thread.stop()
             self.node_active = False
             self.tab_dash.lbl_status.setText("STANDBY")
-            self.tab_dash.lbl_status.setStyleSheet("color:#8e8e93; font-size:24px; font-weight:bold")
+            self.tab_dash.lbl_status.setStyleSheet("color:#9CA3AF; font-size:32px; font-weight:800")
             self.tab_dash.btn_start.setText("INITIALIZE NODE")
-            self.tab_dash.btn_start.setStyleSheet("background:#1c1c1e; color:#00E676; border:2px solid #00E676; border-radius:40px; font-size:18px; font-weight:bold")
+            self.tab_dash.btn_start.setStyleSheet("""
+                QPushButton {
+                    background-color: #FFFFFF;
+                    color: #10B981;
+                    border: 4px solid #10B981;
+                    border-radius: 140px;
+                    font-size: 18px;
+                    font-weight: bold;
+                }
+                QPushButton:hover { background-color: #ECFDF5; }
+            """)
 
     def on_hw(self, d):
         if d['has_gpu']:
             self.tab_hw.lbl_mode.setText("🟢 GPU MODE ACTIVE (High Efficiency)")
-            self.tab_hw.lbl_mode.setStyleSheet("color:#00E676; font-weight:bold")
+            self.tab_hw.lbl_mode.setStyleSheet("color:#10B981; font-weight:bold")
             self.tab_hw.gpu_bar.setValue(int(d['gpu']))
             self.tab_hw.gpu_val.setText(f"{d['gpu']}%")
             self.tab_hw.vram_bar.setValue(int(d['vram']))
@@ -727,12 +861,13 @@ class ElysiumApp(QMainWindow):
             self.tab_hw.power_val.setText(f"{d['power']}")
         else:
             self.tab_hw.lbl_mode.setText("⚠️ CPU MODE (Low Efficiency)")
-            self.tab_hw.lbl_mode.setStyleSheet("color:#ffb700; font-weight:bold")
+            self.tab_hw.lbl_mode.setStyleSheet("color:#F59E0B; font-weight:bold")
             self.tab_hw.gpu_bar.setValue(int(d['cpu'])) # Show CPU on GPU bar as fallback
             self.tab_hw.gpu_val.setText(f"CPU: {d['cpu']}%")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    app.setFont(QFont("Segoe UI", 9))
     win = ElysiumApp()
     win.show()
     sys.exit(app.exec_())
