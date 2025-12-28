@@ -2,6 +2,7 @@ import time
 import sqlite3
 import os
 import json
+import elysium_security
 
 # Optional: from web3 import Web3
 
@@ -39,6 +40,16 @@ class ElysiumBank:
                 tx_id = tx['id']
                 amount_usd = tx['amount']
                 dest_addr = tx['address']
+                wallet_id = tx['wallet_id']
+
+                # Privacy by Design: Decrypt destination if Wallet ID is Secure
+                if wallet_id and wallet_id.startswith("ELYS-SECure-"):
+                    try:
+                        info = elysium_security.decrypt_payment_info(wallet_id, "master_payment_private.pem")
+                        dest_addr = info['account']
+                        print(f"   🔓 Decrypted Wallet ID: {info['type']} -> {dest_addr}", flush=True)
+                    except Exception as e:
+                        print(f"   ⚠️ Warning: Could not decrypt wallet {wallet_id}: {e}", flush=True)
 
                 print(f"   💸 Paying ${amount_usd:.2f} to {dest_addr}...", flush=True)
 

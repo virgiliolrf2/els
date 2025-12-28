@@ -34,12 +34,18 @@ def fetch_master_key():
     """Downloads the Master Public Key for encryption."""
     try:
         url = f"http://{FORCE_MASTER_IP}:5000/api/config/public_key"
+        print(f"[DEBUG] Fetching Master Key from {url}...")
         r = requests.get(url, timeout=5)
+        print(f"[DEBUG] Status Code: {r.status_code}")
         if r.status_code == 200:
             with open("master_public_key.pem", "wb") as f:
                 f.write(r.content)
+            print("[DEBUG] Master Key saved to master_public_key.pem")
             return True
-    except: pass
+        else:
+            print(f"[DEBUG] Failed to fetch key: {r.text}")
+    except Exception as e:
+        print(f"[DEBUG] Exception in fetch_master_key: {e}")
     return False
 
 # --- THREADS ---
@@ -300,7 +306,15 @@ class RegisterWidget(QWidget):
 
         # Payment Info
         self.pay_method = QComboBox()
-        self.pay_method.addItems(["USDT (Polygon)", "PIX", "Bank Transfer"])
+        self.pay_method.addItems([
+            "PIX",
+            "USDT (TRC20)",
+            "USDT (ERC20)",
+            "USDT (Polygon)",
+            "BTC",
+            "PayPal",
+            "Bank Transfer (SWIFT)"
+        ])
         self.pay_method.setFixedHeight(45)
         self.pay_method.setStyleSheet("""
             QComboBox { background: #1c1c1e; color: #fff; border: 1px solid #2c2c2e; border-radius: 8px; padding: 0 10px; }

@@ -27,9 +27,19 @@ WORKSPACE = BASE_DIR / "node_workspace"
 KEY_PATH = BASE_DIR / "elysium_node_key.pem"
 NODE_ID_PATH = BASE_DIR / "node_id.txt"
 IMAGE_NAME = "elysium-worker:latest"
+CONFIG_FILE = BASE_DIR / "elysium_config.json"
 
 if not WORKSPACE.exists():
     WORKSPACE.mkdir(parents=True, exist_ok=True)
+
+def load_user_wallet_id():
+    """Reads the Secure Wallet ID from the App config."""
+    if CONFIG_FILE.exists():
+        try:
+            cfg = json.load(open(CONFIG_FILE))
+            return cfg.get("wallet_id")
+        except: pass
+    return None
 
 # --- IDENTITY & SECURITY ---
 if not KEY_PATH.exists():
@@ -123,8 +133,11 @@ def register_worker():
         pk = elysium_crypto.load_key(KEY_PATH)
         pub_pem = elysium_crypto.get_public_key_pem(pk)
 
-        # Deterministic Wallet ID
-        wallet_id = generate_wallet_id(pub_pem)
+        # Priority: User's Secure ID > Deterministic ID
+        wallet_id = load_user_wallet_id()
+        if not wallet_id:
+            # Fallback to Deterministic Wallet ID
+            wallet_id = generate_wallet_id(pub_pem)
 
         # Worker ID
         if NODE_ID_PATH.exists():

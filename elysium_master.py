@@ -113,12 +113,13 @@ def init_db():
     conn.execute("CREATE TABLE IF NOT EXISTS transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, wallet_id TEXT, amount REAL, timestamp REAL, description TEXT)")
     conn.commit(); conn.close()
 
-def register_user(email, password):
+def register_user(email, password, wallet_id=None):
     conn = sqlite3.connect(DB_FILE)
     try:
         if conn.execute("SELECT email FROM users WHERE email=?", (email,)).fetchone(): return None
         pw_hash = generate_password_hash(password)
-        wallet_id = f"ELYS-{str(uuid.uuid4())[:8].upper()}"
+        if not wallet_id:
+            wallet_id = f"ELYS-{str(uuid.uuid4())[:8].upper()}"
         conn.execute("INSERT INTO users (email, password_hash, wallet_id, created_at) VALUES (?, ?, ?, ?)",
                      (email, pw_hash, wallet_id, time.time()))
         conn.commit(); return wallet_id
@@ -325,7 +326,7 @@ def api_login():
 
 @app.route('/api/auth/signup', methods=['POST'])
 def api_signup():
-    wid = register_user(request.form.get('email'), request.form.get('password'))
+    wid = register_user(request.form.get('email'), request.form.get('password'), request.form.get('wallet_id'))
     if wid:
         flask.session['user_id'] = request.form.get('email')
         flask.session['wallet_id'] = wid
