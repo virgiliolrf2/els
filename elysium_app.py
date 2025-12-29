@@ -10,7 +10,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QPushButton, QLabel,
                              QVBoxLayout, QWidget, QTextEdit, QHBoxLayout, QFrame,
                              QGraphicsDropShadowEffect, QStackedWidget, QListWidget,
                              QListWidgetItem, QProgressBar, QLineEdit, QComboBox,
-                             QSpacerItem, QSizePolicy, QCheckBox)
+                             QSpacerItem, QSizePolicy, QCheckBox, QSizeGrip)
 from PyQt5.QtCore import QThread, pyqtSignal, Qt, QSize, QPoint
 from PyQt5.QtGui import QColor, QFont, QIcon, QCursor
 import hashlib
@@ -697,7 +697,7 @@ class ElysiumApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("ELYSIUM PROVIDER CLIENT")
-        self.resize(1100, 750)
+        self.resize(980, 680)
 
         # Frameless Logic
         self.setWindowFlags(Qt.FramelessWindowHint)
