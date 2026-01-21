@@ -1,79 +1,99 @@
-import sys, os, subprocess, time
+import sys, os, subprocess, time, threading, sqlite3, json, math, uuid
+from pathlib import Path
+from flask import Flask, jsonify, request, render_template_string
+import flask
+from werkzeug.utils import secure_filename
+from werkzeug.security import generate_password_hash, check_password_hash
+import elysium_crypto
+import elysium_bank
+import elysium_security
 
 # --- 1. BOOTLOADER HÍBRIDO (WINDOWS -> WSL) ---
-# Se estiver rodando no Windows, ele se "auto-injeta" no WSL
 if os.name == 'nt':
     print("[BOOT] 🖥️ Detectado Windows. Preparando ambiente WSL Linux...", flush=True)
-    
     current_script = os.path.abspath(__file__)
     drive, path = os.path.splitdrive(current_script)
     wsl_path = f"/mnt/{drive.lower().replace(':', '')}{path.replace(os.sep, '/')}"
-    
-    print("[BOOT] 🛠️ Verificando e Instalando Dependências no WSL (pode pedir senha)...")
-    try:
-        install_cmd = "sudo apt update && sudo apt install -y python3 python3-pip python3-flask python3-libtorrent zip unzip"
-        subprocess.check_call(["wsl", "bash", "-c", install_cmd])
-    except subprocess.CalledProcessError:
-        print("[BOOT] ❌ Falha na instalação automática. Verifique se o WSL está funcionando.")
-        sys.exit(1)
+    venv_path = "~/.elysium_master_env"
 
-    print(f"[BOOT] 🚀 Lançando Master dentro do Linux: {wsl_path}")
-    print("="*60)
-    subprocess.call(["wsl", "python3", wsl_path])
+    print("[BOOT] 🛠️ Configurando Ambiente Virtual no WSL (Evita conflitos PEP 668)...")
+    try:
+        subprocess.check_call(["wsl", "bash", "-c", "sudo apt update && sudo apt install -y python3 python3-venv python3-pip golang-go"])
+        setup_cmd = (
+            f"if [ ! -d {venv_path} ]; then python3 -m venv {venv_path}; fi && "
+            f"{venv_path}/bin/pip install --quiet hivemind cryptography torch flask transformers datasets"
+        )
+        subprocess.check_call(["wsl", "bash", "-c", setup_cmd])
+    except subprocess.CalledProcessError as e:
+        print(f"[BOOT] ⚠️ Erro na instalação de dependências: {e}")
+
+    print(f"[BOOT] 🚀 Lançando Master dentro do Linux (Venv): {wsl_path}")
+    wsl_dir = wsl_path.rsplit('/', 1)[0]
+    launch_cmd = f"cd '{wsl_dir}' && {venv_path}/bin/python3 {wsl_path}"
+    subprocess.call(["wsl", "bash", "-c", launch_cmd])
     sys.exit(0)
 
 # ==============================================================================
-# DAQUI PARA BAIXO É CÓDIGO LINUX (RODANDO DENTRO DO WSL)
+# DAQUI PARA BAIXO É CÓDIGO LINUX
 # ==============================================================================
 
-import flask
-from flask import Flask, jsonify, request, render_template_string, send_from_directory
-from werkzeug.utils import secure_filename
-import sqlite3, threading, zipfile, json, math, shutil, random
-from pathlib import Path
-from datetime import datetime
+def check_and_fix_hivemind():
+    try:
+        import hivemind.hivemind_cli as cli
+        p2pd_path = os.path.join(os.path.dirname(cli.__file__), 'p2pd')
+        if not os.path.exists(p2pd_path): raise FileNotFoundError("p2pd binary missing")
+        try:
+            proc = subprocess.Popen([p2pd_path, "--help"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            proc.wait(timeout=1)
+        except subprocess.TimeoutExpired: proc.kill()
+        except Exception as e: raise e
+    except Exception as e:
+        print(f"[BOOT] 🛠️ Rebuilding Hivemind from Source...")
+        try:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "--force-reinstall", "--no-binary", "hivemind", "hivemind"])
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+        except Exception as build_err:
+            print(f"[BOOT] ❌ Critical Failure rebuilding Hivemind: {build_err}")
+            sys.exit(1)
 
-try:
-    import libtorrent as lt
-except ImportError:
-    print("[LINUX] ❌ Erro Crítico: libtorrent não carregou. O Bootloader falhou?")
-    sys.exit(1)
+check_and_fix_hivemind()
+import hivemind
+import transformers
+import datasets
 
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
+app.jinja_env.filters['from_json'] = json.loads
 
-# --- CONFIGURAÇÃO E ESTRUTURA ---
-DB_FILE = "elysium_ledger.db"
+# --- DESIGN ASSETS ---
+LOGO_SVG = """
+<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M12 2L2 12L12 22L22 12L12 2Z" fill="#10B981" stroke="#059669" stroke-width="2" stroke-linejoin="round"/>
+<path d="M12 6L6 12L12 18L18 12L12 6Z" fill="#D1FAE5" stroke="#10B981" stroke-width="1.5" stroke-linejoin="round"/>
+</svg>
+"""
+
+# --- CONFIG ---
+DB_FILE = "elysium_ledger_v4.db"
 STORAGE_DIR = Path("./elysium_storage")
-SHARDS_DIR = STORAGE_DIR / "shards"
-ARTIFACTS_DIR = STORAGE_DIR / "artifacts" # Nova estrutura de artefatos
-TORRENTS_DIR = STORAGE_DIR / "torrents"
-BUNDLE_DIR = STORAGE_DIR / "bundles"
+for p in [STORAGE_DIR]: p.mkdir(parents=True, exist_ok=True)
 
-# Garante a existência de todas as pastas críticas
-for p in [STORAGE_DIR, SHARDS_DIR, ARTIFACTS_DIR, TORRENTS_DIR, BUNDLE_DIR]: 
-    p.mkdir(parents=True, exist_ok=True)
+# Generate Payment Keys on Startup
+if not os.path.exists("master_payment_private.pem"):
+    print("[MASTER] 🔑 Generating Payment Keys...")
+    elysium_security.generate_master_keys()
 
-WSL_VENV_PATH = "~/.elysium_venv_master"
-
-# --- CONFIGURAÇÃO DE ALOCAÇÃO AVANÇADA ---
-BATCH_TARGET_MB = 1024  # Meta de 1GB por lote
-MIN_STEAL_TIME = 60     # Só rouba se o node vitima for demorar mais de 60s
-STEAL_RATIO = 0.3       # Rouba 30% da fila da vítima
-
-# --- ESTADO GLOBAL (IN-MEMORY CACHE) ---
 CURRENT_MISSION = {
     "job_id": None,
-    "job_start_time": None,
-    "shards_registry": {}, # { 'shard_0': {'status': 'PENDING', 'worker': None, 'size_mb': 50.5, 'torrent': 'file.torrent'} }
-    "worker_queues": {},    # { 'worker_A': ['shard_1', 'shard_2'] }
-    "worker_stats": {},     # { 'worker_A': {'avg_time': 12.5, 'last_seen': 123456, 'resources': {}} }
-    "total_shards": 0,
-    "initial_peers": [], 
-    "status": "IDLE", 
-    "logs": []
+    "status": "IDLE",
+    "initial_peers": [],
+    "logs": [],
+    "swarm_velocity": 0.0,
+    "active_peers_count": 0,
+    "mode": "data_parallel"
 }
-BT_SESSION = None
+
+DHT = None
 
 def log_master(msg):
     ts = time.strftime('%H:%M:%S')
@@ -81,558 +101,632 @@ def log_master(msg):
     CURRENT_MISSION["logs"].append(f"{ts} - {msg}")
     if len(CURRENT_MISSION["logs"]) > 100: CURRENT_MISSION["logs"].pop(0)
 
-# --- MOTOR BITTORRENT (SEEDER) ---
-def start_bittorrent_seeder():
-    global BT_SESSION
-    log_master("🚀 Iniciando Motor BitTorrent (Seeder)...")
-    BT_SESSION = lt.session()
-    try: 
-        BT_SESSION.listen_on(6881, 6891)
-        log_master("✅ BitTorrent ouvindo nas portas 6881-6891")
-    except Exception as e: 
-        log_master(f"⚠️ Aviso BitTorrent: {e}")
-    while True: time.sleep(1)
-
-def create_and_seed_torrent(file_path):
-    try:
-        fs = lt.file_storage()
-        lt.add_files(fs, str(file_path))
-        t = lt.create_torrent(fs)
-        t.set_creator('Elysium Master Node')
-        lt.set_piece_hashes(t, str(file_path.parent))
-        
-        torrent_path = TORRENTS_DIR / (file_path.name + ".torrent")
-        with open(torrent_path, "wb") as f: f.write(lt.bencode(t.generate()))
-            
-        params = {
-            'save_path': str(file_path.parent),
-            'ti': lt.torrent_info(str(torrent_path))
-        }
-        BT_SESSION.add_torrent(params)
-        return torrent_path.name
-    except Exception as e:
-        log_master(f"❌ Erro ao criar Torrent para {file_path.name}: {e}"); return None
-
-# --- INTEGRAÇÃO HIVEMIND (DHT) ---
-def start_dht_bridge():
-    dht_script = r'''import time, hivemind; dht = hivemind.DHT(start=True, host_maddrs=["/ip4/0.0.0.0/tcp/8001"]); print(f"__ADDR_START__{dht.get_visible_maddrs()[0]}__ADDR_END__", flush=True); while True: time.sleep(10)'''
-    with open("elysium_dht_daemon.py", "w") as f: f.write(dht_script)
-    
-    setup = f"if [ ! -d {WSL_VENV_PATH} ]; then python3 -m venv --system-site-packages {WSL_VENV_PATH}; fi && " \
-            f"source {WSL_VENV_PATH}/bin/activate && pip install hivemind torch --quiet 2>/dev/null"
-    subprocess.call(["bash", "-c", setup])
-    
-    cmd = f"source {WSL_VENV_PATH}/bin/activate && python3 {os.getcwd()}/elysium_dht_daemon.py"
-    proc = subprocess.Popen(["bash", "-c", cmd], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
-    for line in proc.stdout:
-        if "__ADDR_START__" in line:
-            try:
-                addr = line.split("__ADDR_START__")[1].split("__ADDR_END__")[0]
-                CURRENT_MISSION["initial_peers"] = [addr]
-                log_master(f"🌐 DHT Anchor Online: {addr}")
-            except: pass
-
-# --- SHARDING INTELIGENTE ---
-def shard_dataset(zip_path, chunks=20):
-    log_master(f"🔪 Fatiando Dataset {zip_path.name} em {chunks} partes estocásticas...")
-    
-    # Limpeza de torrents antigos da sessão
-    if BT_SESSION:
-        for t in BT_SESSION.get_torrents(): BT_SESSION.remove_torrent(t)
-            
-    # Limpa diretórios temporários
-    for f in SHARDS_DIR.glob("*"): os.remove(f)
-    for f in TORRENTS_DIR.glob("*"): os.remove(f)
-    
-    # Reset Total
-    CURRENT_MISSION["shards_registry"] = {}
-    CURRENT_MISSION["worker_queues"] = {}
-    
-    try:
-        with zipfile.ZipFile(zip_path, 'r') as z:
-            files = [f for f in z.namelist() if not f.endswith('/')]
-            random.shuffle(files) # Shuffle para evitar viés de dados sequenciais
-            
-            if not files: 
-                log_master("❌ Erro: Dataset vazio.")
-                return
-
-            batch_size = math.ceil(len(files) / chunks)
-            
-            for i in range(chunks):
-                batch = files[i*batch_size : (i+1)*batch_size]
-                if not batch: break
-                
-                shard_name = f"shard_{i}"
-                shard_path = SHARDS_DIR / f"{shard_name}.zip"
-                
-                with zipfile.ZipFile(shard_path, 'w', zipfile.ZIP_DEFLATED) as out:
-                    for f in batch: out.writestr(f, z.read(f))
-                
-                size_mb = shard_path.stat().st_size / (1024 * 1024)
-                t_name = create_and_seed_torrent(shard_path)
-                
-                if t_name: 
-                    CURRENT_MISSION["shards_registry"][shard_name] = {
-                        "status": "PENDING", 
-                        "worker": None, 
-                        "size_mb": size_mb,
-                        "torrent": t_name,
-                        "created_at": time.time()
-                    }
-        
-        CURRENT_MISSION["total_shards"] = len(CURRENT_MISSION["shards_registry"])
-        log_master(f"✅ Sharding concluído: {CURRENT_MISSION['total_shards']} fragmentos prontos para distribuição.")
-    except Exception as e: log_master(f"❌ Erro Crítico no Sharding: {e}")
-
-# --- BANCO DE DADOS (PERSISTÊNCIA) ---
+# --- DB ---
 def init_db():
     conn = sqlite3.connect(DB_FILE)
-    conn.execute("CREATE TABLE IF NOT EXISTS workers (worker_id TEXT PRIMARY KEY, last_seen REAL, earnings REAL, total_shards INTEGER)")
+    # Workers: Hardware telemetry + Owner
+    conn.execute("CREATE TABLE IF NOT EXISTS workers (worker_id TEXT PRIMARY KEY, last_seen REAL, balance REAL, total_steps INTEGER, public_key TEXT, hardware_specs TEXT, region TEXT, owner_wallet_id TEXT)")
+    # Users: Auth + Wallet
+    conn.execute("CREATE TABLE IF NOT EXISTS users (email TEXT PRIMARY KEY, password_hash TEXT, wallet_id TEXT UNIQUE, balance REAL DEFAULT 0.0, created_at REAL)")
+    # Withdrawals: Financial Ledger - Added tx_hash
+    conn.execute("CREATE TABLE IF NOT EXISTS withdrawals (id INTEGER PRIMARY KEY AUTOINCREMENT, wallet_id TEXT, address TEXT, amount REAL, status TEXT, timestamp REAL, tx_hash TEXT)")
+    # Transactions: History
+    conn.execute("CREATE TABLE IF NOT EXISTS transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, wallet_id TEXT, amount REAL, timestamp REAL, description TEXT)")
     conn.commit(); conn.close()
 
-def update_db(wid, amount=0, shards_inc=0):
+def register_user(email, password, wallet_id=None):
     conn = sqlite3.connect(DB_FILE)
-    conn.execute("INSERT OR IGNORE INTO workers VALUES (?, ?, 0, 0)", (wid, time.time()))
-    conn.execute("UPDATE workers SET last_seen=?, earnings=earnings+?, total_shards=total_shards+? WHERE worker_id=?", 
-                 (time.time(), amount, shards_inc, wid))
-    conn.commit(); conn.close()
+    try:
+        if conn.execute("SELECT email FROM users WHERE email=?", (email,)).fetchone(): return None
+        pw_hash = generate_password_hash(password)
+        if not wallet_id:
+            wallet_id = f"ELYS-{str(uuid.uuid4())[:8].upper()}"
+        conn.execute("INSERT INTO users (email, password_hash, wallet_id, created_at) VALUES (?, ?, ?, ?)",
+                     (email, pw_hash, wallet_id, time.time()))
+        conn.commit(); return wallet_id
+    finally: conn.close()
 
-# --- ENGINE DE ORQUESTRAÇÃO (WORK STEALING) ---
-def try_steal_work(thief_wid):
-    """
-    Algoritmo Robin Hood v2:
-    Analisa a latência média de cada worker e rouba tarefas de quem 
-    tem TTC (Time To Completion) muito alto.
-    """
-    candidates = []
-    for victim_wid, queue in CURRENT_MISSION["worker_queues"].items():
-        if victim_wid == thief_wid or not queue: continue
-        
-        stats = CURRENT_MISSION["worker_stats"].get(victim_wid, {'avg_time': 30.0})
-        avg_time = stats.get('avg_time', 30.0)
-        estimated_finish_time = len(queue) * avg_time
-        
-        if estimated_finish_time > MIN_STEAL_TIME:
-            candidates.append((estimated_finish_time, victim_wid))
-    
-    candidates.sort(reverse=True, key=lambda x: x[0])
-    
-    if candidates:
-        ttc, victim_id = candidates[0]
-        victim_queue = CURRENT_MISSION["worker_queues"][victim_id]
-        steal_count = max(1, int(len(victim_queue) * STEAL_RATIO))
-        stolen_shards = victim_queue[-steal_count:]
-        
-        # Atomically transfer
-        CURRENT_MISSION["worker_queues"][victim_id] = victim_queue[:-steal_count]
-        log_master(f"⚖️ STEAL: {thief_wid} roubou {steal_count} shards de {victim_id} (Load Balancing).")
-        return stolen_shards
+def verify_user(email, password):
+    conn = sqlite3.connect(DB_FILE); conn.row_factory = sqlite3.Row
+    user = conn.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+    conn.close()
+    if user and check_password_hash(user['password_hash'], password): return user
     return None
 
-def assign_next_task(wid):
-    # 1. Fila Pessoal
-    if wid in CURRENT_MISSION["worker_queues"] and CURRENT_MISSION["worker_queues"][wid]:
-        return CURRENT_MISSION["worker_queues"][wid].pop(0), "Local Queue"
-
-    # 2. Alocação em Lote (Batching)
-    pending = [sid for sid, data in CURRENT_MISSION["shards_registry"].items() if data['status'] == "PENDING"]
-    if pending:
-        new_batch = []
-        current_mb = 0
-        for sid in pending:
-            if current_mb >= BATCH_TARGET_MB: break
-            s_data = CURRENT_MISSION["shards_registry"][sid]
-            new_batch.append(sid)
-            current_mb += s_data['size_mb']
-            CURRENT_MISSION["shards_registry"][sid]['status'] = "ASSIGNED"
-            CURRENT_MISSION["shards_registry"][sid]['worker'] = wid
-        
-        target = new_batch[0]
-        if len(new_batch) > 1:
-            CURRENT_MISSION["worker_queues"][wid] = new_batch[1:]
-        log_master(f"📦 BATCH: {wid} recebeu {len(new_batch)} shards ({current_mb:.1f} MB).")
-        return target, "New Batch"
-
-    # 3. Work Stealing
-    stolen = try_steal_work(wid)
-    if stolen:
-        target = stolen[0]
-        for sid in stolen: CURRENT_MISSION["shards_registry"][sid]['worker'] = wid
-        if len(stolen) > 1: CURRENT_MISSION["worker_queues"][wid] = stolen[1:]
-        return target, "Stolen Work"
-
-    return None, None
-
-# --- AGREGADOR DE RESULTADOS (NEURAL REDUCER) ---
-def finalize_job_artifacts(job_id):
-    """
-    Compila todos os resultados parciais em um único 'Super Artifact'.
-    Isso simula o 'reduce' do MapReduce ou Federated Averaging simples.
-    """
-    job_dir = ARTIFACTS_DIR / job_id
-    if not job_dir.exists(): return
-    
-    log_master(f"🔄 Iniciando agregação final para Job: {job_id}")
-    
-    final_zip_name = f"MERGED_RESULTS_{job_id}.zip"
-    final_zip_path = ARTIFACTS_DIR / final_zip_name
-    
+def update_worker_credit(wid, steps_inc, amount, public_key=None, hardware=None, owner_wallet_id=None):
+    conn = sqlite3.connect(DB_FILE)
     try:
-        with zipfile.ZipFile(final_zip_path, 'w', zipfile.ZIP_DEFLATED) as master_zip:
-            # Varre todos os zips de resultados dentro da pasta do Job
-            for result_zip in job_dir.glob("*.zip"):
-                # Opção A: Apenas concatenar os ZIPs (mais rápido)
-                master_zip.write(result_zip, arcname=f"parts/{result_zip.name}")
-                
-                # Opção B (Avançada): Extrair e renomear pesos (futuro)
-                # Isso seria onde a lógica de PyTorch State Dict Merge entraria
-        
-        log_master(f"✅ Agregação concluída: {final_zip_name} criado com sucesso.")
-        CURRENT_MISSION["logs"].append(f"JOB COMPLETED: Download {final_zip_name}")
-        
-    except Exception as e:
-        log_master(f"❌ Falha na agregação final: {e}")
+        if public_key:
+            hw_str = json.dumps(hardware) if hardware else "{}"
+            region = hardware.get("region", "global") if hardware else "global"
+            if owner_wallet_id:
+                conn.execute("""
+                    INSERT INTO workers (worker_id, last_seen, balance, total_steps, public_key, hardware_specs, region, owner_wallet_id)
+                    VALUES (?, ?, 0, 0, ?, ?, ?, ?)
+                    ON CONFLICT(worker_id) DO UPDATE SET last_seen=excluded.last_seen, public_key=excluded.public_key, hardware_specs=excluded.hardware_specs, region=excluded.region, owner_wallet_id=excluded.owner_wallet_id
+                """, (wid, time.time(), public_key, hw_str, region, owner_wallet_id))
+            else:
+                conn.execute("""
+                    INSERT INTO workers (worker_id, last_seen, balance, total_steps, public_key, hardware_specs, region)
+                    VALUES (?, ?, 0, 0, ?, ?, ?)
+                    ON CONFLICT(worker_id) DO UPDATE SET last_seen=excluded.last_seen, public_key=excluded.public_key, hardware_specs=excluded.hardware_specs, region=excluded.region
+                """, (wid, time.time(), public_key, hw_str, region))
+        else:
+            conn.execute("UPDATE workers SET last_seen=?, balance=balance+?, total_steps=total_steps+? WHERE worker_id=?",
+                         (time.time(), amount, steps_inc, wid))
+            if amount > 0:
+                cur = conn.execute("SELECT owner_wallet_id FROM workers WHERE worker_id=?", (wid,))
+                res = cur.fetchone()
+                if res and res[0]:
+                    conn.execute("UPDATE users SET balance=balance+? WHERE wallet_id=?", (amount, res[0]))
+                    # Optional: Log small mining rewards? Maybe too verbose.
+        conn.commit()
+    finally: conn.close()
 
-# --- ROTAS DA API FLASK ---
+# --- ORCHESTRATOR ---
+class Orchestrator:
+    def __init__(self):
+        self.topology_map = {}
+        self.lock = threading.Lock()
 
+    def schedule_job(self, job_spec):
+        log_master("🧠 Orchestrator: Assigning Mission...")
+        conn = sqlite3.connect(DB_FILE); conn.row_factory = sqlite3.Row
+        workers = conn.execute("SELECT * FROM workers WHERE last_seen > ?", (time.time() - 300,)).fetchall()
+        conn.close()
+
+        if not workers:
+            log_master("❌ No active workers found.")
+            return
+
+        # Simple assignment for now
+        with self.lock:
+            for w in workers:
+                self.topology_map[w['worker_id']] = job_spec
+        log_master(f"✅ Mission assigned to {len(workers)} nodes.")
+
+SCHEDULER = Orchestrator()
+BANK = elysium_bank.ElysiumBank(DB_FILE, real_money=False) # Start in Simulation Mode
+
+# --- HIVEMIND ---
+def start_dht_service():
+    global DHT
+    log_master("🚀 DHT Bootstrap Online.")
+    try:
+        DHT = hivemind.DHT(start=True, host_maddrs=["/ip4/0.0.0.0/tcp/8001"])
+        visible = DHT.get_visible_maddrs()
+        CURRENT_MISSION["initial_peers"] = [str(a) for a in visible]
+        threading.Thread(target=monitor_swarm_metrics, daemon=True).start()
+    except Exception as e: log_master(f"❌ DHT Error: {e}")
+
+def monitor_swarm_metrics():
+    while True:
+        if CURRENT_MISSION["status"] == "ACTIVE" and DHT:
+            conn = sqlite3.connect(DB_FILE)
+            workers = conn.execute("SELECT worker_id, public_key FROM workers").fetchall()
+            conn.close()
+            for wid, pub_key in workers:
+                key = f"job_{CURRENT_MISSION['job_id']}_metrics_{wid}"
+                entry = DHT.get(key, latest=True)
+                if entry and entry.value:
+                    try:
+                        data = json.loads(entry.value)
+                        sig = data['signature']
+                        payload = data['payload']
+                        payload_str = json.dumps(payload, sort_keys=True)
+                        key_to_use = pub_key if pub_key else payload['public_key']
+                        if elysium_crypto.verify_signature(key_to_use, payload_str, sig):
+                            if time.time() - payload.get('timestamp', 0) < 30:
+                                update_worker_credit(wid, 0, 0.0001, pub_key)
+                    except: pass
+        time.sleep(5)
+
+# --- API ---
 @app.route('/api/job/current')
-def api_job(): 
-    total = CURRENT_MISSION["total_shards"]
-    done = len([s for s in CURRENT_MISSION["shards_registry"].values() if s['status'] == "COMPLETED"])
-    prog = int((done/total)*100) if total > 0 else 0
-    
-    # Trigger de Finalização
-    if total > 0 and done == total and CURRENT_MISSION.get("status") == "ACTIVE":
-        CURRENT_MISSION["status"] = "COMPLETED"
-        threading.Thread(target=finalize_job_artifacts, args=(CURRENT_MISSION["job_id"],)).start()
-        
-    return jsonify({
-        "meta": CURRENT_MISSION, 
-        "progress": prog, 
-        "done": done, 
-        "total": total, 
-        "logs": CURRENT_MISSION["logs"]
-    })
+def api_job_current(): return jsonify({"meta": CURRENT_MISSION})
 
-@app.route('/api/storage/<path:filename>')
-def api_download(filename):
-    # Roteamento inteligente de arquivos
-    if "torrents/" in filename: return send_from_directory(TORRENTS_DIR, filename.replace("torrents/", ""))
-    if "bundles/" in filename: return send_from_directory(BUNDLE_DIR, filename.replace("bundles/", ""))
-    if "results/" in filename: 
-        # Suporte para baixar merged results
-        return send_from_directory(ARTIFACTS_DIR, filename.replace("results/", ""))
-    return send_from_directory(STORAGE_DIR, filename)
+@app.route('/api/wallet/balance/<wallet_id>')
+def api_wallet(wallet_id):
+    conn = sqlite3.connect(DB_FILE)
+    # Check User Account
+    res = conn.execute("SELECT balance FROM users WHERE wallet_id=?", (wallet_id,)).fetchone()
+    if res:
+        bal = res[0]
+    else:
+        # Check Standalone Worker Aggregation
+        # Sum balances of all workers owned by this wallet
+        res = conn.execute("SELECT SUM(balance) FROM workers WHERE owner_wallet_id=?", (wallet_id,)).fetchone()
+        bal = res[0] if res[0] else 0.0
 
-@app.route('/api/job/get_task', methods=['POST'])
-def api_get_task():
-    wid = request.json.get('worker_id')
-    if CURRENT_MISSION["status"] != "ACTIVE":
-        return jsonify({"status": "NO_JOB"})
-
-    shard_id, reason = assign_next_task(wid)
-    
-    if shard_id:
-        s_data = CURRENT_MISSION["shards_registry"][shard_id]
-        remaining = len(CURRENT_MISSION["worker_queues"].get(wid, []))
-        return jsonify({
-            "status": "TASK_FOUND", 
-            "shard_id": shard_id, 
-            "torrent_url": f"torrents/{s_data['torrent']}",
-            "info": reason,
-            "queue_len": remaining
-        })
-    return jsonify({"status": "NO_TASKS"})
-
-@app.route('/api/job/upload_result', methods=['POST'])
-def api_upload_result():
-    try:
-        f = request.files['result_file']
-        wid = request.form.get('worker_id')
-        sid = request.form.get('shard_id')
-        jid = CURRENT_MISSION.get('job_id', 'unknown_job')
-        
-        # 1. Cria pasta específica para o Job ID (Isolamento de Artefatos)
-        job_dir = ARTIFACTS_DIR / jid
-        job_dir.mkdir(parents=True, exist_ok=True)
-        
-        # 2. Salva o arquivo de forma organizada
-        s_name = secure_filename(f"{sid}_by_{wid}.zip")
-        save_path = job_dir / s_name
-        f.save(save_path)
-        
-        log_master(f"📥 Recebido resultado de {wid} para {sid}")
-        return jsonify({"status": "saved", "path": str(save_path)})
-    except Exception as e:
-        log_master(f"❌ Erro no Upload: {e}")
-        return jsonify({"status": "error"}), 500
-
-@app.route('/api/job/complete_task', methods=['POST'])
-def api_complete():
-    d = request.json; sid, wid = d.get('shard_id'), d.get('worker_id')
-    if sid in CURRENT_MISSION["shards_registry"]:
-        CURRENT_MISSION["shards_registry"][sid]['status'] = "COMPLETED"
-        update_db(wid, 0.0050, 1) # Paga $0.0050 e incrementa contador
-    return jsonify({"status": "ACK"})
+    conn.close()
+    return jsonify({"wallet_id": wallet_id, "balance": bal})
 
 @app.route('/api/job/heartbeat', methods=['POST'])
-def api_heartbeat(): 
+def api_heartbeat():
     d = request.json
-    wid = d.get('worker_id')
-    
-    # Armazena telemetria avançada
+    if d.get('worker_id'):
+        update_worker_credit(d['worker_id'], 0, 0.0001, d.get('public_key'), d.get('hardware'), d.get('wallet_id'))
+    return jsonify({"status": "ack", "peers": CURRENT_MISSION["initial_peers"]})
+
+@app.route('/api/job/config/<worker_id>')
+def api_secure_config(worker_id):
+    with SCHEDULER.lock:
+        cfg = SCHEDULER.topology_map.get(worker_id)
+    return jsonify({"status": "ASSIGNED", "config": cfg}) if cfg else jsonify({"status": "WAITING"})
+
+@app.route('/api/config/public_key')
+def api_public_key():
+    # Primary: Absolute path based on script location
+    base_dir = Path(__file__).parent.resolve()
+    key_path = base_dir / "master_payment_public.pem"
+
+    # Fallback: CWD
+    cwd_path = Path.cwd() / "master_payment_public.pem"
+
+    log_master(f"🔑 Key Request. Checking: {key_path} AND {cwd_path}")
+
+    target_path = key_path
+    if not key_path.exists() and cwd_path.exists():
+        target_path = cwd_path
+
+    if not target_path.exists():
+        log_master(f"⚠️ Key missing. Generating at {key_path}...")
+        try:
+            priv_path = base_dir / "master_payment_private.pem"
+            elysium_security.generate_master_keys(str(priv_path), str(key_path))
+            target_path = key_path
+        except Exception as e:
+            log_master(f"❌ Key Gen Failed: {e}")
+            return f"Error: {e}", 500
+
+    if target_path.exists():
+        return flask.send_file(str(target_path))
+
+    return "Not Found (Check Console)", 404
+
+@app.route('/api/wallet/withdraw', methods=['POST'])
+def api_withdraw():
+    addr = request.form.get("address")
+    wallet_id = request.form.get("wallet_id")
+
+    # 1. Authenticated User (Session)
+    if 'user_id' in flask.session:
+        conn = sqlite3.connect(DB_FILE)
+        try:
+            user = conn.execute("SELECT * FROM users WHERE email=?", (flask.session['user_id'],)).fetchone()
+            if user and user[3] >= 10.0:
+                conn.execute("UPDATE users SET balance = balance - ? WHERE email=?", (user[3], user[0]))
+                conn.execute("INSERT INTO withdrawals (wallet_id, address, amount, status, timestamp) VALUES (?, ?, ?, ?, ?)",
+                             (user[2], addr, user[3], 'PENDING', time.time()))
+                conn.commit()
+                return jsonify({"status": "ok", "message": "Withdrawal Pending"})
+        finally: conn.close()
+
+    # 2. Standalone Worker (App Request)
+    elif wallet_id:
+        conn = sqlite3.connect(DB_FILE)
+        try:
+            # Check for Encrypted Wallet ID
+            real_dest = addr
+            if wallet_id.startswith("ELYS-SECure-"):
+                try:
+                    info = elysium_security.decrypt_payment_info(wallet_id, "master_payment_private.pem")
+                    log_master(f"🔓 Decrypted Payment Info: {info['type']} -> {info['account']}")
+                    # For MVP, we still record the public 'addr' request in DB but log the real dest internally
+                    # In real prod, 'addr' in DB should be the decrypted one or kept encrypted
+                except Exception as e:
+                    log_master(f"❌ Decryption Failed: {e}")
+                    return jsonify({"status": "error", "message": "Invalid Secure Wallet ID"}), 400
+
+            # Sum Balance
+            res = conn.execute("SELECT SUM(balance) FROM workers WHERE owner_wallet_id=?", (wallet_id,)).fetchone()
+            total = res[0] if res[0] else 0.0
+
+            if total >= 10.0:
+                # Deduct from all workers proportionally or reset to 0
+                conn.execute("UPDATE workers SET balance = 0 WHERE owner_wallet_id=?", (wallet_id,))
+                conn.execute("INSERT INTO withdrawals (wallet_id, address, amount, status, timestamp) VALUES (?, ?, ?, ?, ?)",
+                             (wallet_id, addr, total, 'PENDING', time.time()))
+                conn.commit()
+                return jsonify({"status": "ok", "message": "Withdrawal Pending"})
+        finally: conn.close()
+
+    return jsonify({"status": "error", "message": "Insufficient Funds or Invalid Auth"}), 400
+
+@app.route('/api/admin/payout', methods=['POST'])
+def api_admin_payout():
+    # In real prod, add Auth check here (admin only)
+    count = BANK.process_pending_withdrawals()
+    return jsonify({"status": "ok", "processed": count})
+
+# --- AUTH & JOB START ---
+@app.route('/api/auth/login', methods=['POST'])
+def api_login():
+    user = verify_user(request.form.get('email'), request.form.get('password'))
+    if user:
+        flask.session['user_id'] = user['email']
+        flask.session['wallet_id'] = user['wallet_id']
+        return jsonify({"status": "ok", "redirect": "/dashboard"})
+    return jsonify({"status": "error"}), 401
+
+@app.route('/api/auth/signup', methods=['POST'])
+def api_signup():
+    wid = register_user(request.form.get('email'), request.form.get('password'), request.form.get('wallet_id'))
     if wid:
-        CURRENT_MISSION["worker_stats"][wid] = {
-            'avg_time': d.get('avg_time', 0),
-            'resources': d.get('resources', {}), # CPU, RAM, etc
-            'last_seen': time.time()
+        flask.session['user_id'] = request.form.get('email')
+        flask.session['wallet_id'] = wid
+        return jsonify({"status": "ok", "redirect": "/dashboard"})
+    return jsonify({"status": "error"}), 400
+
+@app.route('/api/auth/logout')
+def api_logout():
+    flask.session.clear(); return flask.redirect('/')
+
+@app.route('/api/storage/jobs/<job_id>/source.tar.gz')
+def serve_source(job_id):
+    path = STORAGE_DIR / "jobs" / job_id / "source.tar.gz"
+    if path.exists():
+        return flask.send_file(path)
+    return "Not Found", 404
+
+@app.route('/api/job/start', methods=['POST'])
+def api_job_start():
+    # Handle Multipart/Form-Data (SDK with File)
+    if 'spec' in request.form:
+        spec = json.loads(request.form['spec'])
+        job_name = spec.get("TrainingJobName", f"job-{int(time.time())}")
+
+        # Handle Code Upload
+        if 'code' in request.files:
+            f = request.files['code']
+            save_dir = STORAGE_DIR / "jobs" / job_name
+            save_dir.mkdir(parents=True, exist_ok=True)
+            f.save(save_dir / "source.tar.gz")
+            spec['CodeUrl'] = f"/api/storage/jobs/{job_name}/source.tar.gz"
+
+    # Handle Raw JSON (Legacy SDK)
+    elif request.is_json:
+        spec = request.json
+        job_name = spec.get("TrainingJobName", f"job-{int(time.time())}")
+
+    # Handle UI Form Submission
+    else:
+        if 'user_id' not in flask.session: return jsonify({"status": "forbidden"}), 403
+        model = request.form.get("model", "gpt2")
+        mode = request.form.get("mode", "data_parallel")
+        # Validate HF
+        try: transformers.AutoConfig.from_pretrained(model)
+        except Exception as e: return f"Invalid Model: {e}", 400
+
+        job_name = f"JOB_{int(time.time())}"
+        spec = {
+            "TrainingJobName": job_name,
+            "AlgorithmSpecification": {
+                "Framework": "pytorch",
+                "ContainerEntrypoint": ["train.py"]
+            },
+            "HyperParameters": {"mode": mode, "model_name": model},
+            "InputDataConfig": {
+                "train": {"DataSource": {"Uri": f"hf://mock-bucket/{uuid.uuid4()}"}}
+            },
+            "OutputDataConfig": {"OutputPath": "/tmp/output"}
         }
-        update_db(wid, 0.0001)
-    return jsonify({"status":"ok"})
 
-@app.route('/api/storage/delete', methods=['POST'])
-def api_delete():
-    # Segurança básica para deleção
-    try:
-        fname = request.form.get('filename')
-        ftype = request.form.get('type')
-        target = None
-        if ftype == 'bundle': target = BUNDLE_DIR / fname
-        elif ftype == 'data': target = STORAGE_DIR / fname # Datasets root
-        elif ftype == 'artifact': target = ARTIFACTS_DIR / fname
-        
-        if target and target.exists():
-            if target.is_dir(): shutil.rmtree(target) # Suporte a deletar pastas de jobs
-            else: os.remove(target)
-            log_master(f"🗑️ Deletado: {fname}")
-            return jsonify({"status": "ok"})
-        return jsonify({"status": "not_found"}), 404
-    except Exception as e: return jsonify({"status": "error", "msg": str(e)}), 500
+    CURRENT_MISSION["job_id"] = job_name
+    CURRENT_MISSION["status"] = "ACTIVE"
+    CURRENT_MISSION["spec"] = spec
 
-# --- INTERFACE WEB REFORMULADA ---
+    log_master(f"🚀 Job Launched: {job_name}")
+    SCHEDULER.schedule_job(spec)
+
+    if request.is_json or 'spec' in request.form:
+        return jsonify({"status": "ok", "job_id": job_name})
+    return flask.redirect('/dashboard')
+
+# --- UI ---
 @app.route('/', methods=['GET', 'POST'])
 def index():
-    if request.method == 'POST':
-        try:
-            # Lógica de Upload e Inicialização de Job
-            bundle_path = None; data_path = None
-            
-            # Code Handling
-            if 'existing_code' in request.form and request.form['existing_code']:
-                bundle_path = BUNDLE_DIR / request.form['existing_code']
-            elif 'project_bundle' in request.files and request.files['project_bundle'].filename:
-                f = request.files['project_bundle']
-                name = secure_filename(f.filename)
-                bundle_path = BUNDLE_DIR / name; f.save(bundle_path)
-                
-            # Data Handling
-            if 'existing_data' in request.form and request.form['existing_data']:
-                data_path = STORAGE_DIR / request.form['existing_data']
-            elif 'dataset_file' in request.files and request.files['dataset_file'].filename:
-                f = request.files['dataset_file']
-                name = secure_filename(f.filename)
-                data_path = STORAGE_DIR / name; f.save(data_path)
-                
-            if bundle_path and data_path:
-                job_name = f"JOB_{int(time.time())}"
-                
-                # Tenta ler manifesto se existir, senão usa defaults
-                entry_point = "main.py"
-                try:
-                    with zipfile.ZipFile(bundle_path, 'r') as z: 
-                        if 'elysium.json' in z.namelist():
-                            m = json.load(z.open('elysium.json'))
-                            entry_point = m.get('entry_point', entry_point)
-                except: pass
-
-                CURRENT_MISSION.update({
-                    'job_id': job_name, 
-                    'job_start_time': time.time(),
-                    'bundle_file': f"bundles/{bundle_path.name}",
-                    'entry_point': entry_point, 
-                    'status': "ACTIVE"
-                })
-                
-                # Inicia Sharding em Thread separada para não travar UI
-                threading.Thread(target=shard_dataset, args=(data_path, 50)).start()
-                
-        except Exception as e: log_master(f"Erro no Deploy: {e}")
-    
-    # Listagens para UI
-    bundles = sorted([f.name for f in BUNDLE_DIR.glob("*.zip")])
-    datasets = sorted([f.name for f in STORAGE_DIR.glob("*.zip")])
-    # Lista apenas os arquivos merged ou pastas de jobs
-    artifacts = sorted([f.name for f in ARTIFACTS_DIR.iterdir()], reverse=True)
-    
-    conn = sqlite3.connect(DB_FILE); conn.row_factory = sqlite3.Row
-    workers_db = conn.execute("SELECT * FROM workers WHERE last_seen > ?", (time.time()-120,)).fetchall()
-    conn.close()
-
-    # HTML/CSS Enterprise
-    return render_template_string("""
+    if 'user_id' not in flask.session:
+        return render_template_string("""
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="h-full bg-slate-50">
 <head>
     <meta charset="UTF-8">
-    <title>Elysium Cloud | Enterprise Command</title>
+    <title>Elysium Cloud | Sign In</title>
+    <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
-    <style>
-        :root {
-            --primary: #2563eb; --success: #22c55e; --bg: #f1f5f9;
-            --surface: #ffffff; --text: #0f172a; --sidebar: #0f172a;
-        }
-        body { font-family: 'Inter', sans-serif; background: var(--bg); color: var(--text); display: flex; height: 100vh; margin:0; overflow:hidden;}
-        .sidebar { width: 240px; background: var(--sidebar); color: #fff; display: flex; flex-direction: column; padding: 20px; }
-        .logo { font-size: 18px; font-weight: 700; margin-bottom: 40px; display: flex; align-items: center; gap: 10px; }
-        .logo span { color: var(--success); }
-        .nav-item { padding: 12px; margin-bottom: 5px; border-radius: 6px; cursor: pointer; color: #94a3b8; transition: 0.2s; }
-        .nav-item:hover, .nav-item.active { background: rgba(255,255,255,0.1); color: #fff; }
-        .content { flex: 1; padding: 30px; overflow-y: auto; display: none; }
-        .content.active { display: block; animation: fadeIn 0.3s; }
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
-        
-        .header { display: flex; justify-content: space-between; margin-bottom: 30px; }
-        .card { background: var(--surface); border-radius: 12px; padding: 24px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 24px; }
-        .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; }
-        
-        .metric { font-size: 32px; font-weight: 700; color: var(--text); }
-        .metric-label { font-size: 13px; color: #64748b; font-weight: 500; text-transform: uppercase; }
-        
-        .terminal { background: #1e293b; color: #f8fafc; font-family: 'JetBrains Mono'; padding: 20px; border-radius: 8px; height: 300px; overflow-y: auto; font-size: 12px; }
-        .log { border-bottom: 1px solid #334155; padding: 4px 0; }
-        
-        .btn { background: var(--primary); color: #fff; border: none; padding: 12px 24px; border-radius: 6px; font-weight: 600; cursor: pointer; width: 100%; }
-        .btn:hover { background: #1d4ed8; }
-        .btn-del { background: transparent; border: 1px solid #ef4444; color: #ef4444; padding: 4px 8px; font-size: 11px; border-radius: 4px; cursor: pointer; }
-        .btn-del:hover { background: #ef4444; color: #fff; }
+    <style> body { font-family: 'Inter', sans-serif; } </style>
+</head>
+<body class="h-full flex items-center justify-center">
+    <div class="bg-white p-8 rounded-2xl shadow-xl border border-slate-100 w-96">
+        <div class="flex flex-col items-center mb-6">
+            <div class="w-12 h-12 mb-2">{{ logo|safe }}</div>
+            <h2 class="text-2xl font-bold text-slate-900 tracking-tight">Elysium Cloud</h2>
+            <p class="text-sm text-slate-500">Enterprise Infrastructure Control</p>
+        </div>
 
-        table { width: 100%; border-collapse: collapse; }
-        th { text-align: left; color: #64748b; font-size: 12px; padding: 10px; border-bottom: 1px solid #e2e8f0; }
-        td { padding: 12px 10px; border-bottom: 1px solid #e2e8f0; font-size: 14px; }
-        
-        .progress-bar { height: 6px; background: #e2e8f0; border-radius: 99px; overflow: hidden; margin-top: 10px; }
-        .fill { height: 100%; background: var(--success); width: 0%; transition: width 0.5s; }
-    </style>
+        <form onsubmit="event.preventDefault(); submitForm(this)" class="space-y-4">
+            <div>
+                <label class="block text-xs font-medium text-slate-500 uppercase mb-1">Email</label>
+                <input name="email" type="email" class="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:bg-white transition" placeholder="name@company.com" required>
+            </div>
+            <div>
+                <label class="block text-xs font-medium text-slate-500 uppercase mb-1">Password</label>
+                <input name="password" type="password" class="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:bg-white transition" placeholder="••••••••" required>
+            </div>
+            <button type="submit" class="w-full py-2.5 bg-emerald-500 hover:bg-emerald-600 text-white font-semibold rounded-lg shadow-sm transition">Access Console</button>
+        </form>
+
+        <div class="mt-6 text-center">
+            <p class="text-xs text-slate-400 cursor-pointer hover:text-emerald-600" onclick="toggleMode()">Don't have an account? Create one</p>
+        </div>
+    </div>
+
     <script>
-        function show(id) {
-            document.querySelectorAll('.content').forEach(e => e.classList.remove('active'));
-            document.querySelectorAll('.nav-item').forEach(e => e.classList.remove('active'));
-            document.getElementById(id).classList.add('active');
-            event.currentTarget.classList.add('active');
+        let isSignup = false;
+        const logo = `{{ logo|safe }}`;
+
+        function toggleMode() {
+            isSignup = !isSignup;
+            const btn = document.querySelector('button');
+            const link = document.querySelector('p.text-xs');
+            if(isSignup) {
+                btn.innerText = "Create Workspace";
+                link.innerText = "Already have an account? Sign In";
+            } else {
+                btn.innerText = "Access Console";
+                link.innerText = "Don't have an account? Create one";
+            }
         }
-        function refresh() {
-            fetch('/api/job/current').then(r=>r.json()).then(d=>{
-                document.getElementById('m-job').innerText = d.meta.job_id || "IDLE";
-                document.getElementById('m-shards').innerText = `${d.done}/${d.total}`;
-                document.getElementById('p-fill').style.width = d.progress + '%';
-                const logs = d.logs.map(l=>`<div class="log">${l}</div>`).join('');
-                const el = document.getElementById('term');
-                if(el.innerHTML != logs) { el.innerHTML = logs; el.scrollTop = el.scrollHeight; }
-            })
-        }
-        setInterval(refresh, 2000);
-        
-        function del(name, type) {
-            if(!confirm("Confirm delete?")) return;
-            const fd = new FormData(); fd.append('filename', name); fd.append('type', type);
-            fetch('/api/storage/delete', {method:'POST', body:fd}).then(r=>r.json()).then(d=>{
-                if(d.status=='ok') location.reload(); else alert('Error');
-            })
+
+        function submitForm(form) {
+            const endpoint = isSignup ? '/api/auth/signup' : '/api/auth/login';
+            fetch(endpoint, {method:'POST', body:new FormData(form)})
+            .then(r=>r.json())
+            .then(d=>{
+                if(d.status=='ok') location.href = d.redirect;
+                else alert(d.message || "Authentication Failed");
+            });
         }
     </script>
+</body>
+</html>""", logo=LOGO_SVG)
+    return flask.redirect('/dashboard')
+
+@app.route('/dashboard')
+def dashboard():
+    if 'user_id' not in flask.session: return flask.redirect('/')
+
+    conn = sqlite3.connect(DB_FILE); conn.row_factory = sqlite3.Row
+    user = conn.execute("SELECT * FROM users WHERE email=?", (flask.session['user_id'],)).fetchone()
+    workers = conn.execute("SELECT * FROM workers WHERE owner_wallet_id=?", (user['wallet_id'],)).fetchall()
+    txs = conn.execute("SELECT * FROM withdrawals WHERE wallet_id=? ORDER BY timestamp DESC", (user['wallet_id'],)).fetchall()
+    conn.close()
+
+    # Calculate Metrics
+    active_nodes = len([w for w in workers if time.time() - w['last_seen'] < 60])
+    hashrate = sum([json.loads(w['hardware_specs']).get('compute_score', 0) for w in workers])
+    payouts = sum([t['amount'] for t in txs if t['status']=='PAID'])
+
+    return render_template_string("""
+<!DOCTYPE html>
+<html lang="en" class="bg-slate-50">
+<head>
+    <meta charset="UTF-8">
+    <title>Elysium Console</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="//unpkg.com/alpinejs" defer></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style> body { font-family: 'Inter', sans-serif; } </style>
 </head>
-<body>
-    <div class="sidebar">
-        <div class="logo"><span>◆</span> ELYSIUM</div>
-        <div class="nav-item active" onclick="show('dash')">📊 Dashboard</div>
-        <div class="nav-item" onclick="show('deploy')">🚀 Deploy</div>
-        <div class="nav-item" onclick="show('fleet')">💻 Fleet</div>
-        <div class="nav-item" onclick="show('data')">🗄️ Artifacts</div>
-    </div>
-    
-    <div id="dash" class="content active">
-        <div class="header"><h1>Mission Control</h1></div>
-        <div class="grid-3">
-            <div class="card"><div class="metric-label">Active Job</div><div class="metric" id="m-job">---</div></div>
-            <div class="card"><div class="metric-label">Progress</div><div class="metric" id="m-shards">0/0</div><div class="progress-bar"><div class="fill" id="p-fill"></div></div></div>
-            <div class="card"><div class="metric-label">Active Workers</div><div class="metric">{{ workers|length }}</div></div>
+<body class="flex h-screen overflow-hidden" x-data="{ page: 'dashboard' }">
+
+    <!-- SIDEBAR -->
+    <aside class="w-64 bg-white border-r border-slate-200 flex flex-col">
+        <div class="h-16 flex items-center px-6 border-b border-slate-100">
+            <div class="w-8 h-8 mr-3">{{ logo|safe }}</div>
+            <span class="font-bold text-slate-800 tracking-tight">ELYSIUM</span>
         </div>
-        <div class="card" style="background:#1e293b; padding:0">
-            <div id="term" class="terminal"></div>
+
+        <nav class="flex-1 p-4 space-y-1">
+            <a @click="page='dashboard'" :class="page==='dashboard' ? 'bg-emerald-50 text-emerald-700' : 'text-slate-600 hover:bg-slate-50'" class="flex items-center px-3 py-2.5 rounded-lg text-sm font-medium cursor-pointer transition">
+                <span class="mr-3">📊</span> Dashboard
+            </a>
+            <a @click="page='instances'" :class="page==='instances' ? 'bg-emerald-50 text-emerald-700' : 'text-slate-600 hover:bg-slate-50'" class="flex items-center px-3 py-2.5 rounded-lg text-sm font-medium cursor-pointer transition">
+                <span class="mr-3">🖥️</span> Instances
+            </a>
+            <a @click="page='payouts'" :class="page==='payouts' ? 'bg-emerald-50 text-emerald-700' : 'text-slate-600 hover:bg-slate-50'" class="flex items-center px-3 py-2.5 rounded-lg text-sm font-medium cursor-pointer transition">
+                <span class="mr-3">💳</span> Billing & Costs
+            </a>
+        </nav>
+
+        <div class="p-4 border-t border-slate-100">
+            <div class="text-xs font-semibold text-slate-400 uppercase mb-2">Workspace</div>
+            <div class="flex items-center mb-3">
+                <div class="w-8 h-8 rounded-full bg-slate-200 flex items-center justify-center text-xs font-bold text-slate-600 mr-2">
+                    {{ user.email[0]|upper }}
+                </div>
+                <div class="overflow-hidden">
+                    <p class="text-sm font-medium text-slate-700 truncate">{{ user.email }}</p>
+                    <p class="text-xs text-slate-400 truncate">ID: {{ user.wallet_id }}</p>
+                </div>
+            </div>
+            <a href="/api/auth/logout" class="block text-center text-xs text-red-500 hover:text-red-700 font-medium">Sign Out</a>
         </div>
-    </div>
-    
-    <div id="deploy" class="content">
-        <div class="header"><h1>New Mission</h1></div>
-        <div class="card" style="max-width: 600px">
-            <form method="post" enctype="multipart/form-data">
-                <label class="metric-label">Code Bundle (.zip)</label>
-                <div style="display:flex; gap:10px; margin: 10px 0 20px;">
-                    <select name="existing_code" style="flex:1"><option value="">Select Existing...</option>{% for b in bundles %}<option>{{b}}</option>{% endfor %}</select>
-                    <input type="file" name="project_bundle">
+    </aside>
+
+    <!-- MAIN CONTENT -->
+    <main class="flex-1 flex flex-col relative">
+        <!-- GLOBAL HEADER -->
+        <header class="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-8">
+            <div class="flex items-center bg-slate-100 rounded-md px-3 py-1.5 w-96">
+                <span class="text-slate-400 text-sm mr-2">🔍</span>
+                <input class="bg-transparent border-none focus:outline-none text-sm w-full text-slate-600" placeholder="Search resources, jobs, or docs...">
+            </div>
+            <div class="flex items-center gap-4">
+                <div class="flex items-center px-3 py-1 bg-emerald-50 text-emerald-700 rounded-full text-xs font-bold border border-emerald-100">
+                    <span class="w-2 h-2 rounded-full bg-emerald-500 mr-2 animate-pulse"></span>
+                    US-East-1
                 </div>
-                
-                <label class="metric-label">Dataset (.zip)</label>
-                <div style="display:flex; gap:10px; margin: 10px 0 20px;">
-                    <select name="existing_data" style="flex:1"><option value="">Select Existing...</option>{% for d in datasets %}<option>{{d}}</option>{% endfor %}</select>
-                    <input type="file" name="dataset_file">
+                <button class="bg-slate-900 hover:bg-slate-800 text-white text-sm font-medium px-4 py-2 rounded-lg transition shadow-sm" onclick="document.getElementById('modal').showModal()">
+                    + Launch Training Job
+                </button>
+            </div>
+        </header>
+
+        <!-- DASHBOARD VIEW -->
+        <div class="flex-1 overflow-y-auto p-8 bg-slate-50" x-show="page==='dashboard'">
+            <div class="mb-8">
+                <h1 class="text-2xl font-bold text-slate-900">Platform Overview</h1>
+                <p class="text-slate-500">Real-time infrastructure telemetry.</p>
+            </div>
+
+            <!-- HERO METRICS -->
+            <div class="grid grid-cols-4 gap-6 mb-8">
+                <div class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
+                    <p class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">Active Nodes</p>
+                    <p class="text-3xl font-bold text-slate-900">{{ active_nodes }}</p>
                 </div>
-                <button class="btn">INITIALIZE SWARM</button>
+                <div class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
+                    <p class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">Total Hashrate (Est.)</p>
+                    <p class="text-3xl font-bold text-slate-900">{{ "%.0f"|format(hashrate) }} <span class="text-lg text-slate-400 font-normal">TFLOPS</span></p>
+                </div>
+                <div class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
+                    <p class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">Operating Balance</p>
+                    <p class="text-3xl font-bold text-emerald-600">${{ "%.2f"|format(user.balance) }}</p>
+                </div>
+                <div class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
+                    <p class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">Total Payouts</p>
+                    <p class="text-3xl font-bold text-slate-900">${{ "%.2f"|format(payouts) }}</p>
+                </div>
+            </div>
+
+            <!-- INSTANCE TABLE -->
+            <div class="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+                <div class="px-6 py-4 border-b border-slate-100 flex justify-between items-center">
+                    <h3 class="font-bold text-slate-800">Instance List</h3>
+                    <span class="text-xs font-medium text-slate-500 bg-slate-100 px-2 py-1 rounded">{{ workers|length }} Total</span>
+                </div>
+                <table class="w-full text-left">
+                    <thead class="bg-slate-50 text-slate-500 text-xs uppercase font-semibold">
+                        <tr>
+                            <th class="px-6 py-3">Instance ID</th>
+                            <th class="px-6 py-3">Status</th>
+                            <th class="px-6 py-3">Hardware Type</th>
+                            <th class="px-6 py-3">Region</th>
+                            <th class="px-6 py-3">Last Seen</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-100">
+                        {% for w in workers %}
+                        <tr class="hover:bg-slate-50 transition">
+                            <td class="px-6 py-4 font-mono text-sm text-slate-700">{{ w.worker_id }}</td>
+                            <td class="px-6 py-4">
+                                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-emerald-100 text-emerald-800">
+                                    <span class="w-1.5 h-1.5 rounded-full bg-emerald-500 mr-1.5"></span> Running
+                                </span>
+                            </td>
+                            <td class="px-6 py-4 text-sm text-slate-600">{{ (w.hardware_specs|string|from_json).get('gpu_name', 'CPU Instance') }}</td>
+                            <td class="px-6 py-4 text-sm text-slate-600">{{ w.region }}</td>
+                            <td class="px-6 py-4 text-sm text-slate-400">{{ "%.0f"|format(time.time() - w.last_seen) }}s ago</td>
+                        </tr>
+                        {% else %}
+                        <tr><td colspan="5" class="px-6 py-8 text-center text-slate-400 text-sm">No instances provisioned. Run a worker node to see it here.</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- PAYOUTS VIEW -->
+        <div class="flex-1 overflow-y-auto p-8 bg-slate-50" x-show="page==='payouts'">
+            <div class="mb-8 flex justify-between items-center">
+                <div>
+                    <h1 class="text-2xl font-bold text-slate-900">Billing & Payouts</h1>
+                    <p class="text-slate-500">Manage operating costs and worker compensation.</p>
+                </div>
+                <button class="text-sm font-bold text-emerald-600 hover:text-emerald-800" onclick="fetch('/api/admin/payout', {method:'POST'}).then(r=>r.json()).then(d=>alert('Processed: '+d.processed))">Process Pending Batches</button>
+            </div>
+
+            <div class="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+                <table class="w-full text-left">
+                    <thead class="bg-slate-50 text-slate-500 text-xs uppercase font-semibold">
+                        <tr>
+                            <th class="px-6 py-3">Transaction ID</th>
+                            <th class="px-6 py-3">Date</th>
+                            <th class="px-6 py-3">Destination</th>
+                            <th class="px-6 py-3">Amount</th>
+                            <th class="px-6 py-3">Status</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-100">
+                        {% for t in txs %}
+                        <tr>
+                            <td class="px-6 py-4 text-sm text-slate-500">#{{ t.id }}</td>
+                            <td class="px-6 py-4 text-sm text-slate-700">{{ time.ctime(t.timestamp) }}</td>
+                            <td class="px-6 py-4 text-sm font-mono text-slate-500">{{ t.address }}</td>
+                            <td class="px-6 py-4 text-sm font-bold text-slate-900">${{ "%.2f"|format(t.amount) }}</td>
+                            <td class="px-6 py-4">
+                                <span class="text-xs font-bold px-2 py-1 rounded {{ 'bg-green-100 text-green-700' if t.status=='PAID' else 'bg-yellow-100 text-yellow-700' }}">
+                                    {{ t.status }}
+                                </span>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+    </main>
+
+    <!-- MODAL -->
+    <dialog id="modal" class="rounded-xl shadow-2xl p-0 w-[600px] backdrop:bg-slate-900/50">
+        <div class="bg-white p-6">
+            <h3 class="text-xl font-bold text-slate-900 mb-1">Launch Training Job</h3>
+            <p class="text-sm text-slate-500 mb-6">Configure your distributed training mission.</p>
+
+            <form action="/api/job/start" method="POST" class="space-y-4">
+                <div class="grid grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-xs font-bold text-slate-500 uppercase mb-1">Source Type</label>
+                        <select name="source_type" class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm">
+                            <option value="hf">HuggingFace Hub</option>
+                            <option value="s3">S3 / MinIO</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-xs font-bold text-slate-500 uppercase mb-1">Training Mode</label>
+                        <select name="mode" class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm">
+                            <option value="data_parallel">Data Parallel</option>
+                            <option value="model_parallel">Model Parallel</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div>
+                    <label class="block text-xs font-bold text-slate-500 uppercase mb-1">Model Path / ID</label>
+                    <input name="model" class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="meta-llama/Llama-2-7b" required>
+                </div>
+
+                <div>
+                    <label class="block text-xs font-bold text-slate-500 uppercase mb-1">JSON Configuration</label>
+                    <textarea name="config_json" rows="3" class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-mono text-slate-600" placeholder='{"lr": 2e-5, "optimizer": "adamw"}'></textarea>
+                </div>
+
+                <div class="flex justify-end gap-3 mt-6 pt-4 border-t border-slate-100">
+                    <button type="button" class="px-4 py-2 text-sm font-semibold text-slate-500 hover:text-slate-700" onclick="document.getElementById('modal').close()">Cancel</button>
+                    <button type="submit" class="px-4 py-2 text-sm font-bold text-white bg-emerald-500 hover:bg-emerald-600 rounded-lg shadow-sm">Launch Mission</button>
+                </div>
             </form>
         </div>
-    </div>
-    
-    <div id="fleet" class="content">
-        <div class="header"><h1>Compute Fleet</h1></div>
-        <div class="card">
-            <table>
-                <thead><tr><th>ID</th><th>Last Seen</th><th>Shards Done</th><th>Total Earnings</th></tr></thead>
-                <tbody>
-                    {% for w in workers %}
-                    <tr>
-                        <td>{{ w.worker_id }}</td>
-                        <td>{{ "%.0f"|format(time.time() - w.last_seen) }}s ago</td>
-                        <td>{{ w.total_shards }}</td>
-                        <td style="color:var(--success); font-weight:bold">${{ "%.4f"|format(w.earnings) }}</td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
-        </div>
-    </div>
-    
-    <div id="data" class="content">
-        <div class="header"><h1>Artifacts & Results</h1></div>
-        <div class="card">
-            <table>
-                <thead><tr><th>Name</th><th>Type</th><th>Action</th></tr></thead>
-                <tbody>
-                    {% for a in artifacts %}
-                    <tr>
-                        <td style="font-weight:600">{{ a }}</td>
-                        <td>{% if 'MERGED' in a %}📦 Combined Result{% else %}📂 Job Folder{% endif %}</td>
-                        <td>
-                            {% if 'MERGED' in a %}
-                                <a href="/api/storage/results/{{a}}" style="text-decoration:none; margin-right:10px">⬇ Download</a>
-                            {% endif %}
-                            <button class="btn-del" onclick="del('{{a}}', 'artifact')">DELETE</button>
-                        </td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
-        </div>
-    </div>
+    </dialog>
+
 </body>
 </html>
-    """, bundles=bundles, datasets=datasets, artifacts=artifacts, workers=workers_db, time=time)
+""", user=user, workers=workers, txs=txs, time=time, from_json=json.loads, logo=LOGO_SVG, active_nodes=active_nodes, hashrate=hashrate, payouts=payouts)
 
 if __name__ == "__main__":
     init_db()
-    # Daemons
-    threading.Thread(target=start_dht_bridge, daemon=True).start()
-    threading.Thread(target=start_bittorrent_seeder, daemon=True).start()
-    print("=== ELYSIUM MASTER v2.0 (Enterprise Artifacts) ONLINE ===")
+    threading.Thread(target=start_dht_service, daemon=True).start()
     app.run(host='0.0.0.0', port=5000)
